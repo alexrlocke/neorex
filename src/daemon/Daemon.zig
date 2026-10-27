@@ -362,7 +362,7 @@ fn sizeWindow(self: *Daemon, p: *Pane) !void {
     const size = p.windowSize();
     if (p.asked.grid == grid and p.asked.cols == size[0] and p.asked.rows == size[1]) return;
     p.asked = .{ .grid = grid, .cols = size[0], .rows = size[1] };
-    try self.nvim.uiTryResizeGrid(grid, size[0], size[1]);
+    try windows.size(self.nvim, p.win, size[0], size[1]);
 }
 
 /// Draws every pane that changed.

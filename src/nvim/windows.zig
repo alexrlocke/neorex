@@ -27,6 +27,14 @@ pub fn adopt(nvim: *Nvim, win: i64, cols: u32, rows: u32) !void {
     try msgpack.writeInt(nvim.writer(), @max(rows, 1));
 }
 
+/// Sizes external window `win` to fill `cols` x `rows`, its statusline included.
+pub fn size(nvim: *Nvim, win: i64, cols: u32, rows: u32) !void {
+    _ = try nvim.execLua("neorex.size(...)", 3);
+    try msgpack.writeInt(nvim.writer(), win);
+    try msgpack.writeInt(nvim.writer(), @max(cols, 1));
+    try msgpack.writeInt(nvim.writer(), @max(rows, 1));
+}
+
 /// Closes `win`, keeping unsaved changes in its buffer.
 pub fn close(nvim: *Nvim, win: i64) !void {
     _ = try nvim.execLua("neorex.close(...)", 1);
@@ -104,6 +112,7 @@ pub fn parseChannel(result: *msgpack.Decoder) !i64 {
 
 const testing = std.testing;
 const Grids = @import("../screen/Grids.zig");
+const Grid = @import("../screen/Grid.zig");
 
 /// A Neovim running windows.lua, and what it has said.
 const Harness = struct {
@@ -293,6 +302,62 @@ test "windows become external; the anchor stays hidden" {
     try testing.expect(!try h.until(struct {
         fn f(_: *Harness) bool {
             return false;
+        }
+    }.f));
+}
+
+/// Grid row `r` of window `win` starts with `want`.
+fn rowStarts(h: *const Harness, win: i64, r: u32, want: []const u8) bool {
+    const g = h.grids.get(h.grids.gridOf(win) orelse return false) orelse return false;
+    if (r >= g.height) return false;
+    var buf: [256]u8 = undefined;
+    return std.mem.startsWith(u8, Grid.rowText(g, r, &buf), want);
+}
+
+fn gridHeight(h: *const Harness, win: i64) u32 {
+    const g = h.grids.get(h.grids.gridOf(win) orelse return 0) orelse return 0;
+    return g.height;
+}
+
+test "each window shows a statusline inside its pane" {
+    var buf: [1024]u8 = undefined;
+    var h: Harness = .{ .nvim = Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n" }, &buf) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    } };
+    defer h.deinit();
+    try h.nvim.uiAttach(40, 10, .{ .ext_multigrid = true });
+    h.chan_id = try askChannel(&h.nvim);
+    try h.nvim.flush();
+
+    // setup sizes the first window to 40 x 9: 8 rows of text and the statusline
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return x.wins[0] != 0 and gridHeight(x, x.wins[0]) == 9 and rowStarts(x, x.wins[0], 8, "[No Name]");
+        }
+    }.f));
+
+    // :set statusline reaches the window
+    try h.input(":set statusline=GLOBAL<CR>");
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return rowStarts(x, x.wins[0], 8, "GLOBAL");
+        }
+    }.f));
+
+    // no statusline: the text gets the row back
+    try h.input(":set laststatus=0<CR>");
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return gridHeight(x, x.wins[0]) == 9 and rowStarts(x, x.wins[0], 8, "~");
+        }
+    }.f));
+
+    // the user's own statusline for a window stays
+    try h.input(":set laststatus=2 | setlocal statusline=MINE | lua vim.go.statusline = 'OTHER'<CR>");
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return gridHeight(x, x.wins[0]) == 9 and rowStarts(x, x.wins[0], 8, "MINE");
         }
     }.f));
 }

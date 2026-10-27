@@ -41,6 +41,46 @@ end
 
 local making_anchor = false
 
+-- window -> its pane's rows and columns, statusline included
+local sizes = {}
+-- statusline formats we've set, to tell them from ones the user set
+local ours = {}
+
+local function local_stl(win)
+  return api.nvim_get_option_value('statusline', { win = win, scope = 'local' })
+end
+
+-- external windows only show a local statusline: copy the global one
+local function give_statusline(win)
+  local cur = local_stl(win)
+  if cur ~= '' and not ours[cur] then return end
+  local want = vim.o.laststatus == 0 and '' or vim.go.statusline
+  if want ~= '' then ours[want] = true end
+  if cur ~= want then api.nvim_set_option_value('statusline', want, { win = win, scope = 'local' }) end
+end
+
+-- the text's height: what's left of the pane after the statusline
+local function text_height(win, h)
+  return math.max(h - (local_stl(win) ~= '' and 1 or 0), 1)
+end
+
+--- Sizes external `win` to fill `w` x `h`, statusline included.
+function M.size(win, w, h)
+  if not shown(win) then return end
+  sizes[win] = { w, h }
+  give_statusline(win)
+  local th = text_height(win, h)
+  -- every resize redraws the window
+  if api.nvim_win_get_width(win) == w and api.nvim_win_get_height(win) == th then return end
+  api.nvim_win_set_config(win, { width = w, height = th })
+end
+
+local function refit()
+  for win, s in pairs(sizes) do
+    if api.nvim_win_is_valid(win) then M.size(win, s[1], s[2]) else sizes[win] = nil end
+  end
+end
+
 --- Makes ordinary `win` external at `w` x `h`, giving its tab page an anchor first.
 function M.adopt(win, w, h)
   if not shown(win) or api.nvim_win_get_config(win).external then return end
@@ -52,7 +92,9 @@ function M.adopt(win, w, h)
     anchors[tab] = api.nvim_open_win(buf, false, { split = 'left', win = win })
     making_anchor = false
   end
-  api.nvim_win_set_config(win, { external = true, width = w, height = h })
+  give_statusline(win)
+  api.nvim_win_set_config(win, { external = true, width = w, height = text_height(win, h) })
+  sizes[win] = { w, h }
 end
 
 --- Closes `win`, whose pane went away. Unsaved changes stay in its buffer.
@@ -117,6 +159,13 @@ local function schedule_report()
   vim.schedule(report)
 end
 api.nvim_create_autocmd('WinEnter', { group = group, callback = schedule_report })
+
+-- a statusline came, went or changed: fit the windows to their panes again
+api.nvim_create_autocmd('OptionSet', {
+  group = group,
+  pattern = { 'statusline', 'laststatus' },
+  callback = function() vim.schedule(refit) end,
+})
 
 -- :q in the last window quits Neovim: make it the tab's only ordinary window
 -- first. If Neovim then refuses (unsaved changes), the daemon adopts it again.
