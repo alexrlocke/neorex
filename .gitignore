@@ -1,0 +1,11 @@
+# build output
+.zig-cache/
+zig-out/
+# dependencies Zig fetched (Ghostty's, for the golden tests)
+zig-pkg/
+
+# editors and macOS
+.DS_Store
+*.swp
+*.swo
+*~

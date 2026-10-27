@@ -1,0 +1,165 @@
+const std = @import("std");
+
+const Terminal = @import("Terminal.zig");
+const Signals = @import("Signals.zig");
+const input = @import("input.zig");
+const msgpack = @import("msgpack.zig");
+const Framer = @import("Framer.zig");
+const rpc = @import("rpc.zig");
+const Nvim = @import("Nvim.zig");
+const debug_events = @import("debug_events.zig");
+const Grid = @import("Grid.zig");
+const render = @import("render.zig");
+const Forwarder = @import("Forwarder.zig");
+const debug_tui = @import("debug_tui.zig");
+const fdpass = @import("fdpass.zig");
+const pane = @import("pane.zig");
+const debug_panes = @import("debug_panes.zig");
+const Loop = @import("Loop.zig");
+
+const usage =
+    \\usage: neorex <command>
+    \\
+    \\commands:
+    \\  debug-keys                 show each key, paste, focus and mouse event as you type
+    \\  debug-events [nvim args]   run Neovim and print the redraw events it sends
+    \\  debug-tui [nvim args]      run Neovim in this terminal through neorex's renderer
+    \\  debug-panes SOCKET         stand-in daemon: drive the terminals of panes that connect
+    \\  pane SOCKET                hand this terminal to the daemon at SOCKET, then wait
+    \\  help                       show this help
+    \\
+;
+
+pub fn main(init: std.process.Init) !void {
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
+    if (args.len >= 2 and std.mem.eql(u8, args[1], "debug-events")) {
+        return debug_events.run(init.gpa, init.io, args[2..]);
+    }
+    if (args.len >= 2 and std.mem.eql(u8, args[1], "debug-tui")) {
+        return debug_tui.run(init.gpa, init.io, args[2..]);
+    }
+    if (args.len == 3 and std.mem.eql(u8, args[1], "pane")) {
+        return pane.run(init.io, args[2]);
+    }
+    if (args.len == 3 and std.mem.eql(u8, args[1], "debug-panes")) {
+        return debug_panes.run(init.io, args[2]);
+    }
+    if (args.len == 2) {
+        const cmd = args[1];
+        if (std.mem.eql(u8, cmd, "debug-keys")) return debugKeys();
+        if (std.mem.eql(u8, cmd, "help") or std.mem.eql(u8, cmd, "-h") or std.mem.eql(u8, cmd, "--help")) {
+            std.debug.print("{s}", .{usage});
+            return;
+        }
+    }
+    std.debug.print("{s}", .{usage});
+    std.process.exit(2);
+}
+
+/// Terminal modes `debug-keys` turns on, and the sequences that turn them
+/// off again.
+const modes_on = "\x1b[?1049h" ++ // alternate screen: keep the shell's scrollback clean
+    "\x1b[?2004h" ++ // bracketed paste: pastes arrive wrapped in ESC[200~ ... ESC[201~
+    "\x1b[?1004h" ++ // focus reporting: ESC[I and ESC[O
+    "\x1b[?1002h" ++ // mouse: presses, releases and drags
+    "\x1b[?1006h" ++ // mouse: SGR encoding (ESC[<b;x;yM), no limit on size
+    input.kitty_push; // kitty keyboard protocol, after the screen switch
+// Undone in reverse: pop kitty's flags while still on the alternate screen.
+const modes_off = input.kitty_pop ++ "\x1b[?1006l\x1b[?1002l\x1b[?1004l\x1b[?2004l\x1b[?1049l";
+
+/// Shows every input event with the raw bytes that made it, so you can see
+/// what the terminal sends. Ctrl+Q quits.
+fn debugKeys() !void {
+    var out_buf: [16 * 1024]u8 = undefined;
+    var term = try Terminal.init(std.posix.STDIN_FILENO, &out_buf);
+    defer term.deinit();
+
+    // before reading the size, so a resize in between isn't missed
+    var signals = try Signals.init(&.{.WINCH});
+    defer signals.deinit();
+
+    const out = &term.writer;
+    try out.writeAll(modes_on);
+    // Runs before term.deinit (defers run in reverse), so the modes are off
+    // before the terminal's settings come back.
+    defer out.writeAll(modes_off) catch {};
+
+    var ws = try term.size();
+    try out.print("\x1b[H\x1b[2Jdebug-keys: {d}x{d}. Type, paste, click or resize. Ctrl+Q quits.\r\n", .{ ws.col, ws.row });
+    try term.flush();
+
+    var parser: input.Parser = .{};
+    var buf: [4096]u8 = undefined;
+    while (true) {
+        var fds = [_]std.c.pollfd{
+            .{ .fd = term.fd, .events = std.c.POLL.IN, .revents = 0 },
+            .{ .fd = signals.read_fd, .events = std.c.POLL.IN, .revents = 0 },
+        };
+        const ready = std.c.poll(&fds, fds.len, -1);
+        if (ready < 0) {
+            // a signal interrupted poll; its byte is waiting in the pipe
+            if (std.c.errno(ready) == .INTR) continue;
+            return error.PollFailed;
+        }
+
+        if (fds[1].revents != 0) {
+            const fired = try signals.drain();
+            if (fired.contains(.WINCH)) {
+                ws = try term.size();
+                try out.print("resize {d}x{d}\r\n", .{ ws.col, ws.row });
+                try term.flush();
+            }
+        }
+        if (fds[0].revents == 0) continue;
+
+        const n = std.c.read(term.fd, &buf, buf.len);
+        if (n < 0) {
+            if (std.c.errno(n) == .INTR) continue;
+            return error.ReadFailed;
+        }
+        if (n == 0) return; // the terminal went away
+        const bytes = buf[0..@intCast(n)];
+
+        // One line per read: the raw bytes, then the events they made.
+        try out.writeAll("read ");
+        for (bytes) |b| try out.print("{x:0>2} ", .{b});
+        try out.writeAll("\r\n");
+
+        parser.feed(bytes);
+        while (parser.next()) |event| {
+            try out.print("  {f}\r\n", .{event});
+            if (isQuit(event)) {
+                try term.flush();
+                return;
+            }
+        }
+        try term.flush();
+    }
+}
+
+fn isQuit(event: input.Event) bool {
+    return switch (event) {
+        .key => |k| k.mods.ctrl and !k.mods.alt and k.key == .codepoint and k.key.codepoint == 'q',
+        else => false,
+    };
+}
+
+test {
+    // Run the tests in the files main uses.
+    _ = input;
+    _ = Terminal;
+    _ = Signals;
+    _ = msgpack;
+    _ = Framer;
+    _ = rpc;
+    _ = Nvim;
+    _ = debug_events;
+    _ = Grid;
+    _ = render;
+    _ = Forwarder;
+    _ = debug_tui;
+    _ = fdpass;
+    _ = pane;
+    _ = debug_panes;
+    _ = Loop;
+}
