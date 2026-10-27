@@ -10,7 +10,7 @@ inside the pane they belong to.
 
 ## Status
 
-Early and rough. Expect bugs and missing pieces.
+Very early and rough, bugs / missing features are to be expected.
 
 AI has been used heavily in building neorex due to limits on my available time. A lot of the code needs large improvements, cleanup, better design etc. I will be doing this incrementally - any contributions are welcome.
 
