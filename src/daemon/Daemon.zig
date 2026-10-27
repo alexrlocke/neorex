@@ -377,10 +377,14 @@ fn draw(self: *Daemon) !void {
         const drawn = p.view.frame(&self.grids, grid, p == focused, &c.term.writer) catch false;
         if (drawn) c.term.flush() catch try self.paneGone(p);
     }
-    // the message grid is drawn into one pane at most; done with it
+    // drawn into one pane at most; done with them
     if (self.grids.msg_grid) |id| if (self.grids.get(id)) |m| {
         m.dirty.unsetAll();
         m.scrolls_len = 0;
+    };
+    for (self.grids.wins.keys(), self.grids.wins.values()) |id, w| if (w.kind == .float) if (self.grids.get(id)) |f| {
+        f.dirty.unsetAll();
+        f.scrolls_len = 0;
     };
 }
 

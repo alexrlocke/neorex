@@ -356,7 +356,7 @@ const Multi = struct {
     anchor: i64 = 0,
     chan_req: u32 = 0,
     setup_req: u32 = 0,
-    stats: struct { frames: usize = 0, msg_rows: usize = 0, scrolls: usize = 0, cursors: [2]usize = .{ 0, 0 } } = .{},
+    stats: struct { frames: usize = 0, msg_rows: usize = 0, scrolls: usize = 0, cursors: [2]usize = .{ 0, 0 }, floats: usize = 0, float_cursor: usize = 0 } = .{},
 
     fn deinit(m: *Multi) void {
         for (&m.panes) |*p| p.t.deinit(gpa);
@@ -419,6 +419,10 @@ const Multi = struct {
         };
         for (&m.panes, 0..) |*p, i| try m.check(p, i);
         if (m.gs.msg_grid) |id| m.gs.get(id).?.dirty.unsetAll();
+        for (m.gs.wins.keys(), m.gs.wins.values()) |id, w| if (w.kind == .float) if (m.gs.get(id)) |f| {
+            f.dirty.unsetAll();
+            f.scrolls_len = 0;
+        };
         m.stats.frames += 1;
     }
 
@@ -437,10 +441,16 @@ const Multi = struct {
         const msg_n = @min(msg_total, v.rows);
         const msg_top = v.rows - msg_n;
         var grid_rows: u32 = 0;
+        var placed_buf: [Grids.max_floats]Grids.Placed = undefined;
+        var placed: []Grids.Placed = placed_buf[0..0];
         if (grid) |id| {
             const g = m.gs.get(id).?;
             grid_rows = @min(g.height, msg_top);
-            try expectRows(&p.t, g, style, 0, 0, grid_rows, v.cols);
+            placed = m.gs.floatsOver(id, focused, &placed_buf);
+            m.stats.floats += placed.len;
+            var shown = try overlay(&m.gs, g, placed, grid_rows, v.cols);
+            defer shown.deinit(gpa);
+            try expectRows(&p.t, &shown, style, 0, 0, grid_rows, v.cols);
         }
         if (msg_n > 0) {
             try expectRows(&p.t, m.gs.get(m.gs.msg_grid.?).?, style, msg_total - msg_n, msg_top, msg_n, v.cols);
@@ -456,6 +466,15 @@ const Multi = struct {
             const g = m.gs.get(id).?;
             if (g.cursor_row < grid_rows) want = .{ .row = g.cursor_row, .col = g.cursor_col };
         };
+        for (placed) |f| if (m.gs.cursor_grid == f.grid) {
+            const fg = m.gs.get(f.grid).?;
+            const row = f.row + @as(i32, @intCast(fg.cursor_row));
+            const col = f.col + @as(i32, @intCast(fg.cursor_col));
+            if (row >= 0 and row < grid_rows and col >= 0 and col < v.cols) {
+                want = .{ .row = @intCast(row), .col = @intCast(col) };
+                m.stats.float_cursor += 1;
+            }
+        };
         if (msg_n > 0 and m.gs.cursor_grid == m.gs.msg_grid.?) {
             const mg = m.gs.get(m.gs.msg_grid.?).?;
             want = .{ .row = msg_top + mg.cursor_row - (msg_total - msg_n), .col = mg.cursor_col };
@@ -464,6 +483,32 @@ const Multi = struct {
         try expectCursor(&p.t, style, want);
     }
 };
+
+/// Grid `g` with `placed` floats laid over it, cell by cell, as wide as
+/// the floats reach within `cols`.
+fn overlay(gs: *const Grids, g: *const Grid, placed: []const Grids.Placed, rows: u32, cols: u32) !Grid {
+    var width = g.width;
+    for (placed) |f| width = @max(width, @as(u32, @intCast(std.math.clamp(f.col + @as(i32, @intCast(gs.get(f.grid).?.width)), 0, @as(i32, @intCast(cols))))));
+    var out: Grid = .{};
+    try out.resize(gpa, width, g.height);
+    for (0..g.height) |r| @memcpy(out.cells[r * width ..][0..g.width], g.row(@intCast(r)));
+    for (placed) |f| {
+        const fg = gs.get(f.grid).?;
+        for (0..fg.height) |fr| for (0..fg.width) |fc| {
+            const r = f.row + @as(i32, @intCast(fr));
+            const c = f.col + @as(i32, @intCast(fc));
+            if (r < 0 or r >= rows or c < 0 or c >= width) continue;
+            const line = out.cells[@as(usize, @intCast(r)) * width ..][0..width];
+            const x: usize = @intCast(c);
+            // half a wide char under the float's edge shows as a blank
+            if (fc == 0 and x > 0 and line[x].len == 0) line[x - 1] = .{ .hl = line[x - 1].hl };
+            line[x] = fg.row(@intCast(fr))[fc];
+            if (fc == 0 and line[x].len == 0) line[x] = .{ .hl = line[x].hl };
+            if (fc + 1 == fg.width and x + 1 < width and line[x + 1].len == 0) line[x + 1] = .{ .hl = line[x + 1].hl };
+        };
+    }
+    return out;
+}
 
 fn expectBlank(t: *vt.Terminal, row: u32, cols: u32) !void {
     for (0..cols) |c| {
@@ -489,6 +534,19 @@ const multi_steps = [_][]const u8{
     "G",
     ":ec",
     "<Esc>",
+    // floats: over a window, over the screen, then the popup menu
+    ":lua B=vim.api.nvim_create_buf(false,true) vim.api.nvim_buf_set_lines(B,0,-1,false,{'float one','x'})<CR>",
+    ":lua F1=vim.api.nvim_open_win(B,false,{relative='win',row=1,col=3,width=12,height=2,border='single'})<CR>",
+    ":lua F2=vim.api.nvim_open_win(B,false,{relative='editor',anchor='SE',row=6,col=28,width=9,height=1,zindex=60})<CR>",
+    "<C-e>",
+    "<C-y>",
+    "oapple apricot<CR>ap<C-n>",
+    "<C-n>",
+    "<Esc>",
+    ":lua vim.api.nvim_win_set_config(F1,{relative='win',row=3,col=0})<CR>",
+    ":lua vim.api.nvim_set_current_win(F1)<CR>",
+    "Afloat text<Esc>",
+    ":lua vim.api.nvim_win_close(F1,true) vim.api.nvim_win_close(F2,true)<CR>",
 };
 
 test "live neovim with a pane per window" {
@@ -521,4 +579,9 @@ test "live neovim with a pane per window" {
     try testing.expect(m.stats.msg_rows > 3);
     try testing.expect(m.stats.scrolls > 0);
     try testing.expect(m.stats.cursors[0] > 0 and m.stats.cursors[1] > 0);
+    try testing.expect(m.stats.floats > 0);
+    try testing.expect(m.stats.float_cursor > 0);
+    // all closed
+    var placed_buf: [Grids.max_floats]Grids.Placed = undefined;
+    for (m.panes) |p| try testing.expectEqual(0, m.gs.floatsOver(m.gs.gridOf(p.win).?, true, &placed_buf).len);
 }

@@ -104,6 +104,8 @@ local function report()
     api.nvim_set_current_win(to)
     return
   end
+  -- a float shows in the pane it floats over, which stays focused
+  if api.nvim_win_get_config(cur).relative ~= '' then return end
   last = cur
   vim.rpcnotify(chan, 'neorex_win', cur)
 end
