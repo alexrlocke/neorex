@@ -1,7 +1,6 @@
 # neorex
 
-Neovim with each window in its own [Rex](https://www.superlogical.com/rex)
-pane.
+A Rex-Native Neovim frontend built in Zig.
 
 One Neovim runs in the background behind all your panes, so buffers,
 registers, undo and language servers are shared. `:split` and `:vsplit` open
@@ -13,9 +12,7 @@ inside the pane they belong to.
 
 Early and rough. Expect bugs and missing pieces.
 
-AI has been used heavily to build neorex, because of limits on my working
-time. A lot of the code needs large improvements: cleanup, simpler designs and
-better error handling.
+AI has been used heavily in building neorex due to limits on my available time. A lot of the code needs large improvements, cleanup, better design etc. I will be doing this incrementally - any contributions are welcome.
 
 ## Requirements
 
@@ -46,7 +43,7 @@ zig-out/bin/neorex some/file.txt
 `neorex help` lists the debug commands, which run each layer on its own:
 keys, Neovim's redraw events, the renderer, and pane hand-off.
 
-## Limitations
+## Current limitations
 
 - The `<C-w>` resize, swap and move commands do nothing. Use Rex's own pane
   controls instead.
@@ -66,8 +63,9 @@ their own packages:
 - a Rex API client (WebSocket and the control protocol)
 - terminal key input (the kitty keyboard protocol)
 
-neorex should then be easier to extend to other editors, always running in
-Rex.
+neorex should then be easier to extend to other editors that provide similar processes for running external windows.
+
+As rex matures, and there is increased support for things like floating windows, notifications etc we can then start to move more and more things over to rex to display natively.
 
 ## License
 
