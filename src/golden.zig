@@ -3,10 +3,10 @@
 
 const std = @import("std");
 const vt = @import("ghostty-vt");
-const Grid = @import("Grid.zig");
-const render = @import("render.zig");
-const msgpack = @import("msgpack.zig");
-const Nvim = @import("Nvim.zig");
+const Grid = @import("screen/Grid.zig");
+const render = @import("screen/render.zig");
+const msgpack = @import("nvim/msgpack.zig");
+const Nvim = @import("nvim/Nvim.zig");
 
 const testing = std.testing;
 const gpa = testing.allocator;

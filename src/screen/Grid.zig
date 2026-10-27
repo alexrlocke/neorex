@@ -3,8 +3,8 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const msgpack = @import("msgpack.zig");
-const rpc = @import("rpc.zig");
+const msgpack = @import("../nvim/msgpack.zig");
+const rpc = @import("../nvim/rpc.zig");
 
 const Grid = @This();
 
@@ -694,7 +694,7 @@ test "unknown events are skipped" {
 }
 
 test "neovim draws into the grid" {
-    const Nvim = @import("Nvim.zig");
+    const Nvim = @import("../nvim/Nvim.zig");
     const gpa = testing.allocator;
     var buf: [256]u8 = undefined;
     var nvim = Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed" }, &buf) catch |err| switch (err) {

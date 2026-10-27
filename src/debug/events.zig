@@ -3,13 +3,13 @@
 
 const std = @import("std");
 const Writer = std.Io.Writer;
-const Terminal = @import("Terminal.zig");
-const Signals = @import("Signals.zig");
-const input = @import("input.zig");
-const msgpack = @import("msgpack.zig");
-const rpc = @import("rpc.zig");
-const Nvim = @import("Nvim.zig");
-const Forwarder = @import("Forwarder.zig");
+const Terminal = @import("../term/Terminal.zig");
+const Signals = @import("../term/Signals.zig");
+const input = @import("../term/input.zig");
+const msgpack = @import("../nvim/msgpack.zig");
+const rpc = @import("../nvim/rpc.zig");
+const Nvim = @import("../nvim/Nvim.zig");
+const Forwarder = @import("../nvim/Forwarder.zig");
 
 // no alternate screen, so the events stay in scrollback
 const modes_on = "\x1b[?2004h\x1b[?1004h" ++ input.kitty_push;

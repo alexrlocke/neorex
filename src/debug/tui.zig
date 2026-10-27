@@ -2,13 +2,13 @@
 //! grid and renderer. Ctrl+Q or :q quits.
 
 const std = @import("std");
-const Terminal = @import("Terminal.zig");
-const Signals = @import("Signals.zig");
-const input = @import("input.zig");
-const Nvim = @import("Nvim.zig");
-const Forwarder = @import("Forwarder.zig");
-const Grid = @import("Grid.zig");
-const render = @import("render.zig");
+const Terminal = @import("../term/Terminal.zig");
+const Signals = @import("../term/Signals.zig");
+const input = @import("../term/input.zig");
+const Nvim = @import("../nvim/Nvim.zig");
+const Forwarder = @import("../nvim/Forwarder.zig");
+const Grid = @import("../screen/Grid.zig");
+const render = @import("../screen/render.zig");
 
 // mouse: 1002 presses, releases and drags; 1006 SGR encoding
 const modes_on = "\x1b[?1049h\x1b[?2004h\x1b[?1004h\x1b[?1002h\x1b[?1006h" ++ input.kitty_push;

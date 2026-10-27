@@ -4,11 +4,11 @@
 
 const std = @import("std");
 const net = std.Io.net;
-const Terminal = @import("Terminal.zig");
-const Loop = @import("Loop.zig");
-const input = @import("input.zig");
-const fdpass = @import("fdpass.zig");
-const pane = @import("pane.zig");
+const Terminal = @import("../term/Terminal.zig");
+const Loop = @import("../daemon/Loop.zig");
+const input = @import("../term/input.zig");
+const fdpass = @import("../daemon/fdpass.zig");
+const pane = @import("../daemon/pane.zig");
 
 const max_panes = 8;
 

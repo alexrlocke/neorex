@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const Writer = std.Io.Writer;
-const input = @import("input.zig");
+const input = @import("../term/input.zig");
 const msgpack = @import("msgpack.zig");
 const Nvim = @import("Nvim.zig");
 
