@@ -1,6 +1,7 @@
 //! The running daemon: Neovim, its grids, the Rex connection, and a pane
 //! per window. After each Neovim flush, `reconcile` gives new windows panes
 //! and hangs up panes whose windows closed; then every pane is drawn.
+// TODO: Needs a pretty major rewrite
 
 const std = @import("std");
 const net = std.Io.net;
@@ -453,7 +454,7 @@ fn onHelper(self: *Daemon, p: *Pane) !void {
     const r = fdpass.recv(p.conn.?.stream, self.io, &buf) catch return self.paneGone(p);
     if (r.fd) |fd| _ = std.c.close(fd);
     if (r.len == 0) return self.paneGone(p);
-    for (buf[0..r.len]) |b| if (@as(pane_helper.Message, @enumFromInt(b)) == .resized) {
+    for (buf[0..r.len]) |b| if (@as(pane_helper.Message, @fromBackingInt(@intCast(b))) == .resized) {
         const ws = p.conn.?.term.size() catch return self.paneGone(p);
         p.view.resize(ws.col, ws.row);
         try self.sizeWindow(p);

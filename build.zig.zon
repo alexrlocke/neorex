@@ -32,8 +32,12 @@
     // Once all dependencies are fetched, `zig build` no longer requires
     // internet connectivity.
     .dependencies = .{
-        // only for golden tests: Ghostty's terminal emulator as a library
-        .ghostty = .{ .path = "../ghostty", .lazy = true },
+        // only for golden tests (-Dgolden): Ghostty's terminal emulator as a library
+        .ghostty = .{
+            .url = "https://github.com/ghostty-org/ghostty/archive/bf14ea1fbda2d069112003b80ec3b9186b7688f6.tar.gz",
+            .hash = "ghostty-1.3.2-dev-5UdBCxbahgVUi_9Lcj56aRW_eB6-BGEWkPIPPukyR-K6",
+            .lazy = true,
+        },
     },
     // Specifies the set of files and directories that are included in this package.
     // Only files and directories listed here are included in the `hash` that

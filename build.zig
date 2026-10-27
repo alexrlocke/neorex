@@ -28,15 +28,17 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(exe_tests).step);
 
     // golden tests: renderer output through Ghostty's terminal emulator
+    const golden = b.option(bool, "golden", "Run the golden tests too (downloads Ghostty)") orelse false;
+    if (!golden) return;
+    // asked for only here, so other builds never download it
+    const dep = b.lazyDependency("ghostty", .{}) orelse return;
     const golden_mod = b.createModule(.{
         .root_source_file = b.path("src/golden.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
-    if (b.lazyDependency("ghostty", .{})) |dep| {
-        golden_mod.addImport("ghostty-vt", dep.module("ghostty-vt"));
-    }
+    golden_mod.addImport("ghostty-vt", dep.module("ghostty-vt"));
     const golden_tests = b.addTest(.{ .root_module = golden_mod });
     test_step.dependOn(&b.addRunArtifact(golden_tests).step);
 }
