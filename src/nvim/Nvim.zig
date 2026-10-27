@@ -1,4 +1,5 @@
-//! A Neovim child process, spoken to with msgpack-RPC over its stdin and stdout.
+//! A connection to Neovim speaking msgpack-RPC: an embedded child's stdin
+//! and stdout, or a socket to a Neovim started with `--listen`.
 
 const std = @import("std");
 const Io = std.Io;
@@ -9,13 +10,18 @@ const rpc = @import("rpc.zig");
 
 const Nvim = @This();
 
-child: std.process.Child,
+/// Null when connected to a socket.
+child: ?std.process.Child,
 io: Io,
-/// Buffered writes to Neovim's stdin. Send with `flush`.
+/// Neovim's stdout, or the socket.
+read_fd: std.posix.fd_t,
+/// Buffered writes to Neovim's stdin or the socket. Send with `flush`.
 out: Io.File.Writer,
 /// Splits Neovim's stdout into messages.
 framer: Framer = .{},
 next_id: u32 = 1,
+/// The UI size last sent, as columns and rows.
+ui_size: [2]u32 = .{ 0, 0 },
 
 /// Starts `argv`, which must include `--embed`. Requests buffer in `buffer`.
 /// Neovim's stderr is inherited.
@@ -25,17 +31,36 @@ pub fn spawn(io: Io, argv: []const []const u8, buffer: []u8) !Nvim {
     return .{
         .child = child,
         .io = io,
+        .read_fd = child.stdout.?.handle,
         .out = child.stdin.?.writerStreaming(io, buffer),
     };
 }
 
-/// Closes Neovim's stdin, which makes an embedded Neovim exit, then waits for it.
+/// Connects to the socket of a Neovim started with `--listen`.
+pub fn connect(io: Io, path: []const u8, buffer: []u8) !Nvim {
+    const addr = try std.Io.net.UnixAddress.init(path);
+    const stream = try addr.connect(io);
+    const file: Io.File = .{ .handle = stream.socket.handle, .flags = .{ .nonblocking = false } };
+    return .{
+        .child = null,
+        .io = io,
+        .read_fd = stream.socket.handle,
+        .out = file.writerStreaming(io, buffer),
+    };
+}
+
+/// Embedded: closes Neovim's stdin, which makes it exit, then waits for it.
+/// Socket: closes the socket; Neovim keeps running.
 pub fn deinit(self: *Nvim, gpa: Allocator) void {
     self.out.interface.flush() catch {};
-    // close stdin ourselves; wait closes the rest
-    self.child.stdin.?.close(self.io);
-    self.child.stdin = null;
-    _ = self.child.wait(self.io) catch {};
+    if (self.child) |*child| {
+        // close stdin ourselves; wait closes the rest
+        child.stdin.?.close(self.io);
+        child.stdin = null;
+        _ = child.wait(self.io) catch {};
+    } else {
+        _ = std.c.close(self.read_fd);
+    }
     self.framer.deinit(gpa);
     self.* = undefined;
 }
@@ -89,19 +114,23 @@ pub fn uiAttach(self: *Nvim, cols: u32, rows: u32, options: UiOptions) !void {
     try msgpack.writeStr(w, "ext_termcolors");
     try msgpack.writeBool(w, options.ext_termcolors);
     try self.flush();
+    self.ui_size = .{ cols, rows };
 }
 
-/// Asks to resize the UI and flushes. Neovim answers with grid_resize.
+/// Asks to resize the UI and flushes. Neovim answers with grid_resize. Does
+/// nothing for the size it already has: every resize redraws the whole screen.
 pub fn uiTryResize(self: *Nvim, cols: u32, rows: u32) !void {
+    if (self.ui_size[0] == cols and self.ui_size[1] == rows) return;
     _ = try self.request("nvim_ui_try_resize", 2);
     try msgpack.writeInt(self.writer(), cols);
     try msgpack.writeInt(self.writer(), rows);
     try self.flush();
+    self.ui_size = .{ cols, rows };
 }
 
 /// Neovim's stdout. Poll it; readable when `read` won't block.
 pub fn readFd(self: *const Nvim) std.posix.fd_t {
-    return self.child.stdout.?.handle;
+    return self.read_fd;
 }
 
 /// Reads what Neovim has sent, blocking until something arrives. False once
@@ -166,6 +195,58 @@ test "error response" {
 
     const r = try waitResponse(&nvim, gpa, id);
     try std.testing.expect(std.mem.indexOf(u8, r.err.?, "no_such_variable") != null);
+}
+
+test "a resize to the same size isn't sent" {
+    const gpa = std.testing.allocator;
+    var buf: [256]u8 = undefined;
+    var nvim = try spawnForTest(&buf);
+    defer nvim.deinit(gpa);
+    try nvim.uiAttach(40, 10, .{});
+    const before = nvim.next_id;
+    try nvim.uiTryResize(40, 10);
+    try std.testing.expectEqual(before, nvim.next_id);
+    try nvim.uiTryResize(30, 8);
+    try std.testing.expectEqual(before + 1, nvim.next_id);
+}
+
+test "connect to a listening neovim" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const path = "/tmp/neorex-test-connect.sock";
+    var server = std.process.spawn(io, .{
+        .argv = &.{ "nvim", "--clean", "--headless", "--listen", path },
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    }) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+    defer {
+        _ = std.c.kill(server.id.?, .HUP);
+        _ = server.wait(io) catch {};
+    }
+
+    var buf: [256]u8 = undefined;
+    var nvim = try connectRetry(io, path, &buf);
+    defer nvim.deinit(gpa);
+    const id = try nvim.request("nvim_eval", 1);
+    try msgpack.writeStr(nvim.writer(), "1+2");
+    try nvim.flush();
+    var r = try waitResponse(&nvim, gpa, id);
+    try std.testing.expectEqual(@as(i64, 3), try rpc.expectInt(&r.result));
+}
+
+/// `connect`, retrying for up to 2 s: Neovim makes its socket a moment after starting.
+pub fn connectRetry(io: Io, path: []const u8, buffer: []u8) !Nvim {
+    for (0..200) |_| {
+        return connect(io, path, buffer) catch {
+            try io.sleep(.fromMilliseconds(10), .awake);
+            continue;
+        };
+    }
+    return error.Timeout;
 }
 
 test "large reply over several reads" {

@@ -11,9 +11,11 @@ const Forwarder = @This();
 parser: input.Parser = .{},
 /// The next `nvim_paste` phase: 1 starts a paste, 2 continues it.
 paste_phase: i64 = 1,
+/// For the debug commands; the real editor gives Ctrl+Q to Neovim.
+ctrl_q_quits: bool = true,
 
 /// Sends the input in `bytes` to Neovim and flushes. False if the user
-/// pressed Ctrl+Q to quit.
+/// pressed Ctrl+Q to quit and `ctrl_q_quits` is set.
 pub fn feed(self: *Forwarder, nvim: *Nvim, bytes: []const u8) !bool {
     // keys from one read go in one nvim_input
     var keys_buf: [4096]u8 = undefined;
@@ -21,7 +23,7 @@ pub fn feed(self: *Forwarder, nvim: *Nvim, bytes: []const u8) !bool {
     self.parser.feed(bytes);
     while (self.parser.next()) |event| switch (event) {
         .key => |k| {
-            if (isQuit(k)) return false;
+            if (self.ctrl_q_quits and isQuit(k)) return false;
             // room for the longest key name
             if (keys.unusedCapacityLen() < 32) try sendKeys(nvim, &keys);
             try input.writeNvim(k, &keys);

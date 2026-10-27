@@ -4,16 +4,12 @@
 const std = @import("std");
 const Terminal = @import("../term/Terminal.zig");
 const Signals = @import("../term/Signals.zig");
-const input = @import("../term/input.zig");
+const modes = @import("../term/modes.zig");
 const Nvim = @import("../nvim/Nvim.zig");
 const Forwarder = @import("../nvim/Forwarder.zig");
 const Grid = @import("../screen/Grid.zig");
 const render = @import("../screen/render.zig");
 
-// mouse: 1002 presses, releases and drags; 1006 SGR encoding
-const modes_on = "\x1b[?1049h\x1b[?2004h\x1b[?1004h\x1b[?1002h\x1b[?1006h" ++ input.kitty_push;
-// also the terminal's own cursor back, shown even if Neovim was busy
-const modes_off = input.kitty_pop ++ "\x1b[?1006l\x1b[?1002l\x1b[?1004l\x1b[?2004l\x1b[0m\x1b[0 q\x1b[?25h\x1b[?1049l";
 
 /// Runs `nvim --embed` plus `nvim_args`.
 pub fn run(gpa: std.mem.Allocator, io: std.Io, nvim_args: []const []const u8) !void {
@@ -25,8 +21,8 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, nvim_args: []const []const u8) !v
     defer signals.deinit();
 
     const out = &term.writer;
-    try out.writeAll(modes_on);
-    defer out.writeAll(modes_off) catch {};
+    try out.writeAll(modes.editor_on);
+    defer out.writeAll(modes.editor_off) catch {};
     try term.flush();
 
     var argv: std.ArrayList([]const u8) = .empty;

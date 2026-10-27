@@ -4,16 +4,21 @@ const debug_keys = @import("debug/keys.zig");
 const debug_events = @import("debug/events.zig");
 const debug_tui = @import("debug/tui.zig");
 const debug_panes = @import("debug/panes.zig");
+const debug_rex = @import("debug/rex.zig");
 const pane = @import("daemon/pane.zig");
+const launch = @import("daemon/launch.zig");
+const serve = @import("daemon/serve.zig");
 
 const usage =
-    \\usage: neorex <command>
+    \\usage: neorex [nvim args]    open Neovim in this pane
+    \\       neorex <command>
     \\
     \\commands:
     \\  debug-keys                 show each key, paste, focus and mouse event as you type
     \\  debug-events [nvim args]   run Neovim and print the redraw events it sends
     \\  debug-tui [nvim args]      run Neovim in this terminal through neorex's renderer
     \\  debug-panes SOCKET         stand-in daemon: drive the terminals of panes that connect
+    \\  debug-rex SOCKET           open a split in this Rex session and drive its pane; print Rex events
     \\  pane SOCKET                hand this terminal to the daemon at SOCKET, then wait
     \\  help                       show this help
     \\
@@ -21,28 +26,34 @@ const usage =
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len >= 2 and std.mem.eql(u8, args[1], "debug-events")) {
-        return debug_events.run(init.gpa, init.io, args[2..]);
+    const gpa = init.gpa;
+    const io = init.io;
+    const cmd = if (args.len >= 2) args[1] else "";
+    const rest = if (args.len >= 2) args[2..] else args[0..0];
+
+    if (eql(cmd, "help") or eql(cmd, "-h") or eql(cmd, "--help")) {
+        std.debug.print("{s}", .{usage});
+        return;
     }
-    if (args.len >= 2 and std.mem.eql(u8, args[1], "debug-tui")) {
-        return debug_tui.run(init.gpa, init.io, args[2..]);
-    }
-    if (args.len == 3 and std.mem.eql(u8, args[1], "pane")) {
-        return pane.run(init.io, args[2]);
-    }
-    if (args.len == 3 and std.mem.eql(u8, args[1], "debug-panes")) {
-        return debug_panes.run(init.io, args[2]);
-    }
-    if (args.len == 2) {
-        const cmd = args[1];
-        if (std.mem.eql(u8, cmd, "debug-keys")) return debug_keys.run();
-        if (std.mem.eql(u8, cmd, "help") or std.mem.eql(u8, cmd, "-h") or std.mem.eql(u8, cmd, "--help")) {
+    if (eql(cmd, "debug-keys") and rest.len == 0) return debug_keys.run();
+    if (eql(cmd, "debug-events")) return debug_events.run(gpa, io, rest);
+    if (eql(cmd, "debug-tui")) return debug_tui.run(gpa, io, rest);
+    if (eql(cmd, "debug-panes") and rest.len == 1) return debug_panes.run(io, rest[0]);
+    if (eql(cmd, "debug-rex") and rest.len == 1) return debug_rex.run(gpa, io, rest[0]);
+    if (eql(cmd, "pane") and rest.len == 1) return pane.run(io, rest[0]);
+    // started by the launcher, not by people
+    if (eql(cmd, "daemon") and rest.len >= 1) return serve.run(gpa, io, rest[0], rest[1..]);
+    for ([_][]const u8{ "debug-keys", "debug-panes", "debug-rex", "pane", "daemon" }) |known| {
+        if (eql(cmd, known)) {
             std.debug.print("{s}", .{usage});
-            return;
+            std.process.exit(2);
         }
     }
-    std.debug.print("{s}", .{usage});
-    std.process.exit(2);
+    return launch.run(gpa, io, args[1..]);
+}
+
+fn eql(a: []const u8, b: []const u8) bool {
+    return std.mem.eql(u8, a, b);
 }
 
 test {
@@ -60,8 +71,15 @@ test {
     _ = @import("daemon/Loop.zig");
     _ = @import("daemon/fdpass.zig");
     _ = @import("daemon/pane.zig");
+    _ = @import("term/modes.zig");
+    _ = launch;
+    _ = serve;
+    _ = @import("rex/WebSocket.zig");
+    _ = @import("rex/Client.zig");
+    _ = @import("debug/PaneHost.zig");
     _ = debug_keys;
     _ = debug_events;
     _ = debug_tui;
     _ = debug_panes;
+    _ = debug_rex;
 }
