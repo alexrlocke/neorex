@@ -98,6 +98,8 @@ pub fn respondError(self: *Nvim, id: u32, message: []const u8) !void {
 pub const UiOptions = struct {
     /// Unset default colors arrive as -1, so the terminal's own are used.
     ext_termcolors: bool = false,
+    /// A grid per window; see `Grids`.
+    ext_multigrid: bool = false,
 };
 
 /// Attaches as a UI of `cols` x `rows` and flushes.
@@ -106,13 +108,15 @@ pub fn uiAttach(self: *Nvim, cols: u32, rows: u32, options: UiOptions) !void {
     _ = try self.request("nvim_ui_attach", 3);
     try msgpack.writeInt(w, cols);
     try msgpack.writeInt(w, rows);
-    try msgpack.writeMapHeader(w, 3);
+    try msgpack.writeMapHeader(w, 4);
     try msgpack.writeStr(w, "ext_linegrid");
     try msgpack.writeBool(w, true);
     try msgpack.writeStr(w, "rgb");
     try msgpack.writeBool(w, true);
     try msgpack.writeStr(w, "ext_termcolors");
     try msgpack.writeBool(w, options.ext_termcolors);
+    try msgpack.writeStr(w, "ext_multigrid");
+    try msgpack.writeBool(w, options.ext_multigrid);
     try self.flush();
     self.ui_size = .{ cols, rows };
 }
@@ -126,6 +130,23 @@ pub fn uiTryResize(self: *Nvim, cols: u32, rows: u32) !void {
     try msgpack.writeInt(self.writer(), rows);
     try self.flush();
     self.ui_size = .{ cols, rows };
+}
+
+/// Asks for grid `grid` (a window's) to be `cols` x `rows`. Doesn't flush.
+pub fn uiTryResizeGrid(self: *Nvim, grid: u32, cols: u32, rows: u32) !void {
+    _ = try self.request("nvim_ui_try_resize_grid", 3);
+    try msgpack.writeInt(self.writer(), grid);
+    try msgpack.writeInt(self.writer(), @max(cols, 1));
+    try msgpack.writeInt(self.writer(), @max(rows, 1));
+}
+
+/// Starts `nvim_exec_lua(code, args)` and returns its id. Write `arg_count`
+/// args to `writer()` after it, then `flush`.
+pub fn execLua(self: *Nvim, code: []const u8, arg_count: u32) !u32 {
+    const id = try self.request("nvim_exec_lua", 2);
+    try msgpack.writeStr(self.writer(), code);
+    try msgpack.writeArrayHeader(self.writer(), arg_count);
+    return id;
 }
 
 /// Neovim's stdout. Poll it; readable when `read` won't block.

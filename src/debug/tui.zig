@@ -7,7 +7,7 @@ const Signals = @import("../term/Signals.zig");
 const modes = @import("../term/modes.zig");
 const Nvim = @import("../nvim/Nvim.zig");
 const Forwarder = @import("../nvim/Forwarder.zig");
-const Grid = @import("../screen/Grid.zig");
+const Grids = @import("../screen/Grids.zig");
 const render = @import("../screen/render.zig");
 
 
@@ -34,8 +34,9 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, nvim_args: []const []const u8) !v
     var nvim = try Nvim.spawn(io, argv.items, &nvim_buf);
     defer nvim.deinit(gpa);
 
-    var grid: Grid = .{};
-    defer grid.deinit(gpa);
+    // without ext_multigrid everything is grid 1
+    var grids: Grids = .{};
+    defer grids.deinit(gpa);
 
     const ws = try term.size();
     // termcolors: unset colors stay the terminal's, so the theme shows through
@@ -68,10 +69,10 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, nvim_args: []const []const u8) !v
             while (try nvim.next()) |msg| switch (msg) {
                 .notification => |note| if (std.mem.eql(u8, note.method, "redraw")) {
                     var params = note.params;
-                    if (try grid.applyRedraw(gpa, &params)) {
-                        try render.frame(&grid, out);
+                    if (try grids.applyRedraw(gpa, &params)) if (grids.get(1)) |grid| {
+                        try render.frame(grid, &grids.style, out);
                         try term.flush();
-                    }
+                    };
                 },
                 // nothing here serves requests; neovim would wait forever
                 .request => |r| try nvim.respondError(r.id, "neorex debug-tui serves no requests"),

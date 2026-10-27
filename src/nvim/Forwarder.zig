@@ -13,6 +13,12 @@ parser: input.Parser = .{},
 paste_phase: i64 = 1,
 /// For the debug commands; the real editor gives Ctrl+Q to Neovim.
 ctrl_q_quits: bool = true,
+/// The grid mouse events land on; 0 without ext_multigrid.
+grid: u32 = 0,
+/// Off when the caller tells Neovim about focus itself, from `focused`.
+send_focus: bool = true,
+/// The last focus report seen.
+focused: ?bool = null,
 
 /// Sends the input in `bytes` to Neovim and flushes. False if the user
 /// pressed Ctrl+Q to quit and `ctrl_q_quits` is set.
@@ -36,13 +42,16 @@ pub fn feed(self: *Forwarder, nvim: *Nvim, bytes: []const u8) !bool {
         },
         .paste_end => if (self.paste_phase == 2) try paste(nvim, "", 3),
         .focus => |focused| {
-            _ = try nvim.request("nvim_ui_set_focus", 1);
-            try msgpack.writeBool(nvim.writer(), focused);
+            self.focused = focused;
+            if (self.send_focus) {
+                _ = try nvim.request("nvim_ui_set_focus", 1);
+                try msgpack.writeBool(nvim.writer(), focused);
+            }
         },
         .mouse => |m| if (MouseArgs.from(m)) |args| {
             // keys typed before the click go first
             try sendKeys(nvim, &keys);
-            try args.send(nvim);
+            try args.send(nvim, self.grid);
         },
         .unknown => {},
     };
@@ -104,13 +113,13 @@ const MouseArgs = struct {
         return a;
     }
 
-    fn send(self: *const MouseArgs, nvim: *Nvim) !void {
+    fn send(self: *const MouseArgs, nvim: *Nvim, grid: u32) !void {
         _ = try nvim.request("nvim_input_mouse", 6);
         const w = nvim.writer();
         try msgpack.writeStr(w, self.button);
         try msgpack.writeStr(w, self.action);
         try msgpack.writeStr(w, self.mods[0..self.mods_len]);
-        try msgpack.writeInt(w, 0); // grid 0: no ext_multigrid
+        try msgpack.writeInt(w, grid);
         try msgpack.writeInt(w, self.row);
         try msgpack.writeInt(w, self.col);
     }

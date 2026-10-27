@@ -7,6 +7,11 @@ const pane = @import("pane.zig");
 
 pub fn run(gpa: std.mem.Allocator, io: std.Io, nvim_args: []const []const u8) !void {
     if (std.c.isatty(std.posix.STDIN_FILENO) == 0) return error.NotATerminal;
+    // each window becomes a Rex pane
+    if (std.c.getenv("REX_SERVER") == null or std.c.getenv("REX_SESSION") == null) {
+        std.debug.print("neorex: run it in a Rex pane\n", .{});
+        return error.NotInRex;
+    }
 
     var base_buf: [serve.max_path + 1]u8 = undefined;
     var sock_buf: [serve.max_path + 1]u8 = undefined;
@@ -44,5 +49,5 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, nvim_args: []const []const u8) !v
         return error.DaemonFailed;
     }
     // the daemon outlives us; it's never waited for here
-    try pane.run(io, sock);
+    try pane.run(io, sock, null);
 }

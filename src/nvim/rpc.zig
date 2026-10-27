@@ -93,6 +93,34 @@ pub fn expectStr(d: *msgpack.Decoder) ![]const u8 {
     };
 }
 
+pub fn expectBool(d: *msgpack.Decoder) !bool {
+    return switch (try nextToken(d)) {
+        .bool => |b| b,
+        else => error.BadMessage,
+    };
+}
+
+/// Reads a map header, returning its number of pairs.
+pub fn expectMap(d: *msgpack.Decoder) !u32 {
+    return switch (try nextToken(d)) {
+        .map => |n| n,
+        else => error.BadMessage,
+    };
+}
+
+/// A buffer, window or tabpage handle: an ext wrapping an int, or a plain int.
+pub fn expectHandle(d: *msgpack.Decoder) !i64 {
+    return switch (try nextToken(d)) {
+        .int => |n| n,
+        .ext => |e| {
+            var inner: msgpack.Decoder = .{};
+            inner.feed(try expectBytes(d, e.len));
+            return expectInt(&inner);
+        },
+        else => error.BadMessage,
+    };
+}
+
 /// Skips one whole value, however deeply nested.
 pub fn skip(d: *msgpack.Decoder) !void {
     // values still owed; nesting doesn't matter when only counting
@@ -189,6 +217,15 @@ test "parse rejects bad messages" {
     try std.testing.expectError(error.BadMessage, parse("\x93\x03\x01\x02")); // unknown type
     try std.testing.expectError(error.BadMessage, parse("\x93\x01\x01\xc0")); // response too short
     try std.testing.expectError(error.BadMessage, parse("\x94\x01\xff\xc0\xc0")); // negative id
+}
+
+test "handles" {
+    // window 1000 as ext 1, then a plain 7, then -1 as fixext 1
+    var d: msgpack.Decoder = .{};
+    d.feed("\xc7\x03\x01\xcd\x03\xe8\x07\xd4\x01\xff");
+    try std.testing.expectEqual(@as(i64, 1000), try expectHandle(&d));
+    try std.testing.expectEqual(@as(i64, 7), try expectHandle(&d));
+    try std.testing.expectEqual(@as(i64, -1), try expectHandle(&d));
 }
 
 test "skip" {

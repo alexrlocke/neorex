@@ -165,6 +165,23 @@ pub const Event = union(enum) {
     }
 };
 
+/// True if `bytes` hold nothing but focus reports (`CSI I`, `CSI O`).
+pub fn onlyFocusReports(bytes: []const u8) bool {
+    var rest = bytes;
+    while (rest.len > 0) {
+        if (!std.mem.startsWith(u8, rest, "\x1b[I") and !std.mem.startsWith(u8, rest, "\x1b[O")) return false;
+        rest = rest[3..];
+    }
+    return true;
+}
+
+test "focus reports alone" {
+    try std.testing.expect(onlyFocusReports("\x1b[O"));
+    try std.testing.expect(onlyFocusReports("\x1b[I\x1b[O"));
+    try std.testing.expect(!onlyFocusReports("\x1b[Ia"));
+    try std.testing.expect(!onlyFocusReports("\x1b[A"));
+}
+
 /// Writes a key in Neovim's key notation, the form `nvim_input` takes:
 /// `a`, `<lt>`, `<CR>`, `<C-Right>`, `<M-x>`, `<C-Space>`.
 pub fn writeNvim(event: KeyEvent, w: *std.Io.Writer) std.Io.Writer.Error!void {
