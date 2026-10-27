@@ -9,3 +9,7 @@ zig-pkg/
 *.swp
 *.swo
 *~
+
+# local notes
+HANDOFF.md
+plan.md
