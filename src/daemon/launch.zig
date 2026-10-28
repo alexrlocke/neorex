@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const serve = @import("serve.zig");
-const pane = @import("pane.zig");
+const pane = @import("pane_helper.zig");
 
 pub fn run(gpa: std.mem.Allocator, io: std.Io, nvim_args: []const []const u8) !void {
     if (std.c.isatty(std.posix.STDIN_FILENO) == 0) return error.NotATerminal;

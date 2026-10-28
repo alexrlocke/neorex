@@ -7,7 +7,7 @@ const Terminal = @import("../term/Terminal.zig");
 const Loop = @import("../daemon/Loop.zig");
 const input = @import("../term/input.zig");
 const fdpass = @import("../daemon/fdpass.zig");
-const pane = @import("../daemon/pane.zig");
+const pane = @import("../daemon/pane_helper.zig");
 
 const PaneHost = @This();
 

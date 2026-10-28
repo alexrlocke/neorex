@@ -14,9 +14,10 @@ const windows = @import("../nvim/windows.zig");
 const Grids = @import("../screen/Grids.zig");
 const Client = @import("../rex/Client.zig");
 const Loop = @import("Loop.zig");
-const Pane = @import("RexPane.zig");
+const Pane = @import("Pane.zig");
+const Surface = @import("Surface.zig");
 const fdpass = @import("fdpass.zig");
-const pane_helper = @import("pane.zig");
+const pane_helper = @import("pane_helper.zig");
 
 const Daemon = @This();
 
@@ -30,7 +31,7 @@ session_id: []const u8,
 exe: []const u8,
 sock: []const u8,
 grids: Grids = .{},
-panes: std.ArrayList(*Pane) = .empty,
+panes: std.ArrayList(Pane) = .empty,
 next_pane_id: u32 = 1,
 /// Neovim's current window, as the Lua last said; 0 before setup.
 current: i64 = 0,
@@ -45,6 +46,9 @@ ready: bool = false,
 asked: std.AutoArrayHashMapUnmanaged(i64, void) = .empty,
 /// Windows we asked Neovim to close because their pane went away.
 closing: std.AutoArrayHashMapUnmanaged(i64, void) = .empty,
+/// Windows closing to reopen (`:close` on the last one): their panes wait
+/// for the new window instead of hanging up.
+reopening: std.AutoArrayHashMapUnmanaged(i64, void) = .empty,
 /// New windows without panes yet, and where Neovim put them.
 splits: std.AutoArrayHashMapUnmanaged(i64, windows.Split) = .empty,
 /// Rex requests waiting for an answer.
@@ -71,6 +75,9 @@ pub const token_nvim = 1;
 pub const token_listener = 2;
 pub const token_rex = 3;
 
+/// The id `Pane.startup` gives the pane neorex was run in.
+const startup_pane_id = 0;
+
 const RexReq = struct {
     id: u64,
     kind: enum { split, focus, view, other },
@@ -78,14 +85,15 @@ const RexReq = struct {
 };
 
 pub fn deinit(self: *Daemon) void {
-    for (self.panes.items) |p| {
+    for (self.panes.items) |*p| {
+        if (p.closing == null) p.closing = .shutdown;
         p.deinit(self.gpa, self.io);
-        self.gpa.destroy(p);
     }
     self.panes.deinit(self.gpa);
     self.grids.deinit(self.gpa);
     self.asked.deinit(self.gpa);
     self.closing.deinit(self.gpa);
+    self.reopening.deinit(self.gpa);
     self.splits.deinit(self.gpa);
     self.rex_reqs.deinit(self.gpa);
     if (self.rex_focused) |b| self.gpa.free(b);
@@ -94,10 +102,11 @@ pub fn deinit(self: *Daemon) void {
 
 /// Adds the launcher's pane, already connected, and starts talking to
 /// Neovim and Rex.
-pub fn start(self: *Daemon, launch: *Pane) !void {
+pub fn start(self: *Daemon, launch: Pane) !void {
     try self.panes.append(self.gpa, launch);
-    try self.watch(launch);
-    const ws = launch.view;
+    const p = &self.panes.items[self.panes.items.len - 1];
+    try self.watch(p);
+    const ws = p.terminal_surface.?.view;
     try self.nvim.uiAttach(ws.cols, ws.rows, .{ .ext_termcolors = true, .ext_multigrid = true });
     self.chan_req = try windows.askChannel(self.nvim);
     try self.nvim.flush();
@@ -117,9 +126,9 @@ pub fn handle(self: *Daemon, e: Loop.Event) !void {
             const t = Pane.fromToken(e.token);
             // gone already if closed earlier in this batch
             const p = self.paneById(t.id) orelse return;
-            switch (t.source) {
-                .socket => try self.onHelper(p),
-                .tty => try self.onInput(p),
+            switch (t.source_fd) {
+                .helper_socket => try self.onHelper(p),
+                .terminal => try self.onInput(p),
             }
         },
     }
@@ -129,7 +138,7 @@ pub fn handle(self: *Daemon, e: Loop.Event) !void {
 pub fn afterBatch(self: *Daemon) !void {
     var known = false;
     var any = false;
-    for (self.panes.items) |p| if (p.forwarder.focused) |f| {
+    for (self.panes.items) |p| if (p.terminal_surface) |s| if (s.forwarder.focused) |f| {
         known = true;
         any = any or f;
     };
@@ -154,14 +163,14 @@ pub fn accept(self: *Daemon, server: *net.Server) !void {
     };
     const id = pane_helper.parseHello(buf[0..r.len]) catch null;
     const p = if (id) |i| self.paneById(i) else null;
-    if (p == null or p.?.conn != null) {
+    if (p == null or p.?.terminal_surface != null) {
         std.debug.print("neorex daemon: a helper nobody asked for\n", .{});
         _ = std.c.close(tty);
         stream.close(self.io);
         return;
     }
     const pane = p.?;
-    pane.connect(stream, tty) catch |err| {
+    pane.terminal_surface = Surface.create(self.gpa, stream, tty) catch |err| {
         _ = std.c.close(tty);
         stream.close(self.io);
         return err;
@@ -173,30 +182,36 @@ pub fn accept(self: *Daemon, server: *net.Server) !void {
 }
 
 fn watch(self: *Daemon, p: *Pane) !void {
-    const c = p.conn.?;
-    try self.loop.addRead(c.stream.socket.handle, p.token(.socket));
-    try self.loop.addRead(c.term.fd, p.token(.tty));
+    const s = p.terminal_surface.?;
+    try self.loop.addRead(s.helper_socket.socket.handle, p.token(.helper_socket));
+    try self.loop.addRead(s.terminal.fd, p.token(.terminal));
 }
 
+/// Points into `panes`: only good until a pane is added or removed.
 fn paneById(self: *const Daemon, id: u32) ?*Pane {
-    for (self.panes.items) |p| if (p.id == id) return p;
+    for (self.panes.items) |*p| if (p.id == id) return p;
     return null;
 }
 
 fn paneByWin(self: *const Daemon, win: i64) ?*Pane {
     if (win == 0) return null;
-    for (self.panes.items) |p| if (p.win == win) return p;
+    for (self.panes.items) |*p| if (p.neovim_window_handle == win) return p;
     return null;
 }
 
 fn paneByBlock(self: *const Daemon, block: []const u8) ?*Pane {
-    for (self.panes.items) |p| if (p.block) |b| if (std.mem.eql(u8, b, block)) return p;
+    for (self.panes.items) |*p| if (p.rex_block) |*b| if (std.mem.eql(u8, b, block)) return p;
     return null;
+}
+
+/// No terminal yet: the smallest window, as Neovim allows.
+fn windowSize(p: *const Pane) [2]u32 {
+    return if (p.terminal_surface) |s| s.windowSize() else .{ 1, 1 };
 }
 
 /// The pane showing Neovim's current window; before setup, the launcher's.
 fn focusedPane(self: *const Daemon) ?*Pane {
-    if (self.current == 0) return self.paneById(0);
+    if (self.current == 0) return self.paneById(startup_pane_id);
     return self.paneByWin(self.current);
 }
 
@@ -214,9 +229,7 @@ fn onNvim(self: *Daemon) !bool {
                 }
             } else if (try windows.parseNote(n.method, &params)) |note| switch (note) {
                 .current => |win| try self.onCurrent(win),
-                .reopen => |win| if (self.paneByWin(win)) |p| {
-                    p.reuse = true;
-                },
+                .reopen => |win| if (self.paneByWin(win) != null) try self.reopening.put(self.gpa, win, {}),
                 .split => |sp| if (self.paneByWin(sp.win) == null) try self.splits.put(self.gpa, sp.win, sp),
             };
         },
@@ -227,13 +240,12 @@ fn onNvim(self: *Daemon) !bool {
             if (r.err) |e| {
                 std.debug.print("neovim error: {s}\n", .{e});
             } else if (r.id == self.chan_req) {
-                const launch = self.paneById(0).?;
-                const size = launch.windowSize();
+                const size = windowSize(self.paneById(startup_pane_id).?);
                 self.setup_req = try windows.setup(self.nvim, try windows.parseChannel(&result), size[0], size[1]);
                 try self.nvim.flush();
             } else if (r.id == self.setup_req) {
                 const wins = try windows.parseSetup(&result);
-                if (self.paneById(0)) |launch| launch.win = wins[0];
+                if (self.paneById(startup_pane_id)) |launch| launch.neovim_window_handle = wins[0];
                 self.ready = true;
                 try self.reconcile();
                 try self.draw();
@@ -256,12 +268,12 @@ fn onCurrent(self: *Daemon, win: i64) !void {
 
 /// The editor's size follows the focused pane, so messages fit it.
 fn followFocus(self: *Daemon, p: *Pane) !void {
-    if (p.conn == null) return;
-    try self.nvim.uiTryResize(p.view.cols, p.view.rows);
+    const s = p.terminal_surface orelse return;
+    try self.nvim.uiTryResize(s.view.cols, s.view.rows);
 }
 
 fn focusInRex(self: *Daemon, p: *Pane) !void {
-    const block = p.block orelse return;
+    const block: []const u8 = if (p.rex_block) |*b| b else return;
     if (self.rex_focused) |f| if (std.mem.eql(u8, f, block)) return;
     try self.setRexFocused(block);
     self.focus_reqs += 1;
@@ -281,13 +293,14 @@ fn reconcile(self: *Daemon) !void {
     var i = self.panes.items.len;
     while (i > 0) {
         i -= 1;
-        const p = self.panes.items[i];
-        if (p.win == 0 or self.grids.gridOf(p.win) != null) continue;
-        if (p.reuse) {
-            p.win = 0;
-            p.reuse = false;
+        const p = &self.panes.items[i];
+        const win = p.neovim_window_handle orelse continue;
+        if (self.grids.gridOf(win) != null) continue;
+        if (self.reopening.swapRemove(win)) {
+            p.neovim_window_handle = null;
             continue;
         }
+        p.closing = .window_closed;
         self.removePane(i);
     }
     if (self.panes.items.len == 0) {
@@ -295,7 +308,7 @@ fn reconcile(self: *Daemon) !void {
         return;
     }
     // forget windows that are gone
-    for ([_]*std.AutoArrayHashMapUnmanaged(i64, void){ &self.asked, &self.closing }) |set| {
+    for ([_]*std.AutoArrayHashMapUnmanaged(i64, void){ &self.asked, &self.closing, &self.reopening }) |set| {
         var j = set.count();
         while (j > 0) {
             j -= 1;
@@ -312,27 +325,27 @@ fn reconcile(self: *Daemon) !void {
         .ordinary => {
             if (self.asked.contains(w.win)) continue;
             try self.asked.put(self.gpa, w.win, {});
-            const size = if (self.paneByWin(w.win)) |p| p.windowSize() else self.newWindowSize(w.win);
+            const size = if (self.paneByWin(w.win)) |p| windowSize(p) else self.newWindowSize(w.win);
             try windows.adopt(self.nvim, w.win, size[0], size[1]);
         },
         .external => {
             _ = self.asked.swapRemove(w.win);
             if (self.paneByWin(w.win) != null or self.closing.contains(w.win)) continue;
             if (self.waitingPane()) |p| {
-                p.win = w.win;
+                p.neovim_window_handle = w.win;
             } else {
                 try self.newPane(w.win);
             }
         },
         .float, .hidden => {},
     };
-    for (self.panes.items) |p| try self.sizeWindow(p);
+    for (self.panes.items) |*p| try self.sizeWindow(p);
     try self.nvim.flush();
 }
 
 /// A pane kept for a reopened window.
 fn waitingPane(self: *const Daemon) ?*Pane {
-    for (self.panes.items) |p| if (p.win == 0 and p.conn != null) return p;
+    for (self.panes.items) |*p| if (p.neovim_window_handle == null and p.terminal_surface != null) return p;
     return null;
 }
 
@@ -340,7 +353,7 @@ fn waitingPane(self: *const Daemon) ?*Pane {
 fn newWindowSize(self: *const Daemon, win: i64) [2]u32 {
     const sp = self.splitOf(win);
     const p = self.splitFrom(sp) orelse return .{ 80, 24 };
-    const s = p.windowSize();
+    const s = windowSize(p);
     if (sp.side_by_side) return .{ @max(s[0] / 2, 1), s[1] };
     return .{ s[0], @max(s[1] / 2, 1) };
 }
@@ -358,12 +371,14 @@ fn splitFrom(self: *const Daemon, sp: windows.Split) ?*Pane {
 
 /// Asks Neovim for the window to fit the pane, unless it already was.
 fn sizeWindow(self: *Daemon, p: *Pane) !void {
-    if (p.conn == null) return;
-    const grid = self.grids.gridOf(p.win) orelse return;
-    const size = p.windowSize();
-    if (p.asked.grid == grid and p.asked.cols == size[0] and p.asked.rows == size[1]) return;
-    p.asked = .{ .grid = grid, .cols = size[0], .rows = size[1] };
-    try windows.size(self.nvim, p.win, size[0], size[1]);
+    const s = p.terminal_surface orelse return;
+    const win = p.neovim_window_handle orelse return;
+    const grid = self.grids.gridOf(win) orelse return;
+    const size = s.windowSize();
+    const last = p.last_asked_win_size;
+    if (last.grid == grid and last.cols == size[0] and last.rows == size[1]) return;
+    p.last_asked_win_size = .{ .grid = grid, .cols = size[0], .rows = size[1] };
+    try windows.size(self.nvim, win, size[0], size[1]);
 }
 
 /// Draws every pane that changed.
@@ -372,11 +387,12 @@ fn draw(self: *Daemon) !void {
     var i = self.panes.items.len;
     while (i > 0) {
         i -= 1;
-        const p = self.panes.items[i];
-        const c = &(p.conn orelse continue);
-        const grid = if (p.win != 0) self.grids.gridOf(p.win) else null;
-        const drawn = p.view.frame(&self.grids, grid, p == focused, &c.term.writer) catch false;
-        if (drawn) c.term.flush() catch try self.paneGone(p);
+        // backwards, so removing this pane leaves the ones still to draw in place
+        const p = &self.panes.items[i];
+        const s = p.terminal_surface orelse continue;
+        const grid = if (p.neovim_window_handle) |win| self.grids.gridOf(win) else null;
+        const drawn = s.view.frame(&self.grids, grid, p == focused, &s.terminal.writer) catch false;
+        if (drawn) s.terminal.flush() catch try self.paneGone(p);
     }
     // drawn into one pane at most; done with them
     if (self.grids.msg_grid) |id| if (self.grids.get(id)) |m| {
@@ -394,23 +410,22 @@ fn draw(self: *Daemon) !void {
 fn newPane(self: *Daemon, win: i64) !void {
     const sp = self.splitOf(win);
     // beside the window it came from, else any pane Rex knows
-    const anchor = blk: {
-        if (self.splitFrom(sp)) |f| if (f.block) |b| break :blk b;
-        for (self.panes.items) |q| if (q.block) |b| break :blk b;
+    // a copy: appending below can move every pane
+    const anchor: Pane.RexBlock = blk: {
+        if (self.splitFrom(sp)) |f| if (f.rex_block) |b| break :blk b;
+        for (self.panes.items) |q| if (q.rex_block) |b| break :blk b;
         return; // no anchor yet: next flush
     };
-    const p = try self.gpa.create(Pane);
-    p.* = .{ .id = self.next_pane_id, .win = win };
+    const pane_id = self.next_pane_id;
     self.next_pane_id += 1;
-    errdefer self.gpa.destroy(p);
-    try self.panes.append(self.gpa, p);
+    try self.panes.append(self.gpa, Pane.fromNeovimWindow(pane_id, win));
     _ = self.splits.swapRemove(win);
 
     var id_buf: [16]u8 = undefined;
-    const id = try std.fmt.bufPrint(&id_buf, "{d}", .{p.id});
-    try self.rexRequest(.split, p.id, "session.new_split", .{
+    const id = try std.fmt.bufPrint(&id_buf, "{d}", .{pane_id});
+    try self.rexRequest(.split, pane_id, "session.new_split", .{
         .session_id = self.session_id,
-        .anchor_id = anchor,
+        .anchor_id = @as([]const u8, &anchor),
         .direction = if (sp.side_by_side) "horizontal" else "vertical",
         .side = if (sp.before) "before" else "after",
         .layout = .{ .block = .{
@@ -421,70 +436,75 @@ fn newPane(self: *Daemon, win: i64) !void {
     });
 }
 
-/// Hangs up pane `i` and forgets it.
+/// Hangs up pane `i` and forgets it. Set `closing` first.
 fn removePane(self: *Daemon, i: usize) void {
-    const p = self.panes.orderedRemove(i);
+    var p = self.panes.orderedRemove(i);
     p.deinit(self.gpa, self.io);
-    self.gpa.destroy(p);
 }
 
 /// The helper or terminal went away: Rex closed the pane. Close its
 /// window, or end if it was the last pane.
 fn paneGone(self: *Daemon, p: *Pane) !void {
-    p.gone = true;
-    const i = std.mem.indexOfScalar(*Pane, self.panes.items, p).?;
+    p.closing = .rex_pane_closed;
+    const i = for (self.panes.items, 0..) |q, j| {
+        if (q.id == p.id) break j;
+    } else unreachable;
     var others = false;
     for (self.panes.items) |q| {
-        if (q != p and !q.failed) others = true;
+        if (q.id != p.id and q.closing != .request_failed) others = true;
     }
     if (!others) {
         self.end = .pane_gone;
         return;
     }
-    const win = p.win;
+    const maybe_win = p.neovim_window_handle;
     self.removePane(i);
-    if (win == 0) return;
+    const win = maybe_win orelse return;
     try self.closing.put(self.gpa, win, {});
     try windows.close(self.nvim, win);
     try self.nvim.flush();
 }
 
 fn onHelper(self: *Daemon, p: *Pane) !void {
+    const s = p.terminal_surface.?;
     var buf: [64]u8 = undefined;
-    const r = fdpass.recv(p.conn.?.stream, self.io, &buf) catch return self.paneGone(p);
+    const r = fdpass.recv(s.helper_socket, self.io, &buf) catch return self.paneGone(p);
     if (r.fd) |fd| _ = std.c.close(fd);
     if (r.len == 0) return self.paneGone(p);
-    for (buf[0..r.len]) |b| if (@as(pane_helper.Message, @fromBackingInt(@intCast(b))) == .resized) {
-        const ws = p.conn.?.term.size() catch return self.paneGone(p);
-        p.view.resize(ws.col, ws.row);
-        try self.sizeWindow(p);
-        if (p == self.focusedPane()) try self.followFocus(p);
-        try self.nvim.flush();
-        try self.draw();
-    };
+    // once, however many: the size is read fresh, and drawing can move `p`
+    const resized = for (buf[0..r.len]) |b| {
+        if (@as(pane_helper.Message, @fromBackingInt(@intCast(b))) == .resized) break true;
+    } else false;
+    if (!resized) return;
+    const ws = s.terminal.size() catch return self.paneGone(p);
+    s.view.resize(ws.col, ws.row);
+    try self.sizeWindow(p);
+    if (p == self.focusedPane()) try self.followFocus(p);
+    try self.nvim.flush();
+    try self.draw();
 }
 
 fn onInput(self: *Daemon, p: *Pane) !void {
     var buf: [4096]u8 = undefined;
-    const c = &p.conn.?;
-    const n = std.c.read(c.term.fd, &buf, buf.len);
+    const s = p.terminal_surface.?;
+    const n = std.c.read(s.terminal.fd, &buf, buf.len);
     if (n <= 0) return self.paneGone(p);
     const bytes = buf[0..@intCast(n)];
     // typed in a pane Rex hasn't focused, as `rex send` can: that window first.
     // Not focus reports: Rex sends them as it moves focus away.
-    if (p.win != 0 and p.win != self.current and !self.rexFocuses(p) and !input.onlyFocusReports(bytes)) {
-        self.current = p.win;
-        self.current_req = try windows.setCurrent(self.nvim, p.win);
+    if (p.neovim_window_handle) |win| if (win != self.current and !self.rexFocuses(p) and !input.onlyFocusReports(bytes)) {
+        self.current = win;
+        self.current_req = try windows.setCurrent(self.nvim, win);
         try self.followFocus(p);
         try self.focusInRex(p);
-    }
-    p.forwarder.grid = self.grids.gridOf(p.win) orelse 0;
-    _ = try p.forwarder.feed(self.nvim, bytes);
+    };
+    s.forwarder.grid = if (p.neovim_window_handle) |win| self.grids.gridOf(win) orelse 0 else 0;
+    _ = try s.forwarder.feed(self.nvim, bytes);
 }
 
 fn rexFocuses(self: *const Daemon, p: *const Pane) bool {
     const f = self.rex_focused orelse return false;
-    const b = p.block orelse return false;
+    const b = if (p.rex_block) |*b| b else return false;
     return std.mem.eql(u8, f, b);
 }
 
@@ -549,7 +569,7 @@ fn onRexResponse(self: *Daemon, r: Client.Response) !void {
         .err => |e| {
             std.debug.print("neorex daemon: Rex request failed: {s}: {s}\n", .{ e.code, e.message });
             if (req.kind == .split) if (self.paneById(req.pane)) |p| {
-                p.failed = true;
+                p.closing = .request_failed;
             };
             return;
         },
@@ -559,10 +579,13 @@ fn onRexResponse(self: *Daemon, r: Client.Response) !void {
     const ids = Client.get(ok, "block_ids") orelse return;
     if (ids != .array or ids.array.items.len == 0) return;
     const block = Client.str(ids.array.items[0]) orelse return;
-    p.block = try self.gpa.dupe(u8, block);
+    p.rex_block = Pane.rexBlock(block) catch blk: {
+        std.debug.print("neorex daemon: not a block id: {s}\n", .{block});
+        break :blk null;
+    };
     // the creator owns the block and sizes it; let the app size it instead
     try self.rexRequest(.other, 0, "session.disown_block", .{ .session_id = self.session_id, .block_ids = &[_][]const u8{block} });
-    if (p.win == self.current) try self.focusInRex(p);
+    if (p.neovim_window_handle == self.current) try self.focusInRex(p);
 }
 
 /// A session view: if Rex focused one of our panes, make its window current.
@@ -584,9 +607,10 @@ fn onView(self: *Daemon, v: Value) !void {
     try self.setRexFocused(block);
     if (known == null) return;
     const p = self.paneByBlock(block) orelse return;
-    if (p.win == 0 or p.win == self.current) return;
-    self.current = p.win;
-    self.current_req = try windows.setCurrent(self.nvim, p.win);
+    const win = p.neovim_window_handle orelse return;
+    if (win == self.current) return;
+    self.current = win;
+    self.current_req = try windows.setCurrent(self.nvim, win);
     try self.followFocus(p);
     try self.nvim.flush();
     try self.draw();

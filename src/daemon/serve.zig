@@ -9,9 +9,10 @@ const Nvim = @import("../nvim/Nvim.zig");
 const Client = @import("../rex/Client.zig");
 const Loop = @import("Loop.zig");
 const Daemon = @import("Daemon.zig");
-const Pane = @import("RexPane.zig");
+const Pane = @import("Pane.zig");
+const Surface = @import("Surface.zig");
 const fdpass = @import("fdpass.zig");
-const pane = @import("pane.zig");
+const pane = @import("pane_helper.zig");
 
 /// Longest path a Unix socket takes on macOS, less one for the terminator.
 pub const max_path = 103;
@@ -61,15 +62,13 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, base: []const u8, nvim_args: []co
         _ = std.c.close(devnull);
     }
 
-    const launch = try gpa.create(Pane);
-    launch.* = .{ .id = 0 };
+    const rex_block: ?Pane.RexBlock = if (env("REX_BLOCK")) |b| Pane.rexBlock(b) catch blk: {
+        std.debug.print("neorex daemon: REX_BLOCK isn't a block id: {s}\n", .{b});
+        break :blk null;
+    } else null;
+    var launch = Pane.startup(rex_block, try takePane(gpa, io, &server));
     var launch_owned = true;
-    defer if (launch_owned) {
-        launch.deinit(gpa, io);
-        gpa.destroy(launch);
-    };
-    try takePane(io, &server, launch);
-    if (env("REX_BLOCK")) |b| launch.block = try gpa.dupe(u8, b);
+    defer if (launch_owned) launch.deinit(gpa, io);
 
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
@@ -134,7 +133,7 @@ fn env(name: [*:0]const u8) ?[]const u8 {
 }
 
 /// Waits up to 5 s for the launcher's helper and takes its terminal.
-fn takePane(io: std.Io, server: *net.Server, launch: *Pane) !void {
+fn takePane(gpa: std.mem.Allocator, io: std.Io, server: *net.Server) !*Surface {
     var fds = [_]std.c.pollfd{.{ .fd = server.socket.handle, .events = std.c.POLL.IN, .revents = 0 }};
     if (std.c.poll(&fds, 1, 5000) <= 0) return error.NoPane;
     const stream = try server.accept(io);
@@ -144,7 +143,7 @@ fn takePane(io: std.Io, server: *net.Server, launch: *Pane) !void {
     const tty = r.fd orelse return error.NoTerminal;
     errdefer _ = std.c.close(tty);
     if (try pane.parseHello(hello[0..r.len]) != null) return error.BadHello;
-    try launch.connect(stream, tty);
+    return Surface.create(gpa, stream, tty);
 }
 
 test "base path fits a socket" {
