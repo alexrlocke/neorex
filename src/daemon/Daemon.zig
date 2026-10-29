@@ -21,7 +21,7 @@ const pane_helper = @import("pane_helper.zig");
 
 const Daemon = @This();
 
-gpa: Allocator,
+allocator: Allocator,
 io: std.Io,
 loop: *Loop,
 nvim: *Nvim,
@@ -102,14 +102,28 @@ pub fn deinit(self: *Daemon) void {
 
 /// Adds the launcher's pane, already connected, and starts talking to
 /// Neovim and Rex.
-pub fn start(self: *Daemon, launch: Pane) !void {
-    try self.panes.append(self.gpa, launch);
-    const p = &self.panes.items[self.panes.items.len - 1];
-    try self.watch(p);
-    const ws = p.terminal_surface.?.view;
-    try self.nvim.uiAttach(ws.cols, ws.rows, .{ .ext_termcolors = true, .ext_multigrid = true });
+pub fn start(self: *Daemon, launch_pane: Pane) !void {
+    // only ever called on startup
+    std.debug.assert(self.panes.items.len == 0);
+
+    try self.panes.append(self.allocator, launch_pane);
+    const pane: *Pane = &self.panes.items[0];
+
+    try pane.registerWith(self.loop);
+    const view = pane.terminal_surface.?.view;
+    try self.attachNvimUi(view.cols, view.rows);
+    try self.joinRexSession();
+}
+
+/// Attaches as Neovim's UI at `cols` x `rows` and asks for our channel.
+fn attachNvimUi(self: *Daemon, cols: u32, rows: u32) !void {
+    try self.nvim.uiAttach(cols, rows, .{ .ext_termcolors = true, .ext_multigrid = true });
     self.chan_req = try windows.askChannel(self.nvim);
     try self.nvim.flush();
+}
+
+/// Attaches to our Rex session, so we hear its events and can split it.
+fn joinRexSession(self: *Daemon) !void {
     try self.rexRequest(.other, 0, "session.attach", .{ .session_id = self.session_id });
 }
 
@@ -175,16 +189,10 @@ pub fn accept(self: *Daemon, server: *net.Server) !void {
         stream.close(self.io);
         return err;
     };
-    try self.watch(pane);
+    try pane.registerWith(self.loop);
     try self.sizeWindow(pane);
     try self.nvim.flush();
     try self.draw();
-}
-
-fn watch(self: *Daemon, p: *Pane) !void {
-    const s = p.terminal_surface.?;
-    try self.loop.addRead(s.helper_socket.socket.handle, p.token(.helper_socket));
-    try self.loop.addRead(s.terminal.fd, p.token(.terminal));
 }
 
 /// Points into `panes`: only good until a pane is added or removed.

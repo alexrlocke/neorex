@@ -97,7 +97,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, base: []const u8, nvim_args: []co
     try loop.addRead(rex.fd(), Daemon.token_rex);
 
     var d: Daemon = .{
-        .gpa = gpa,
+        .allocator = gpa,
         .io = io,
         .loop = &loop,
         .nvim = &nvim,

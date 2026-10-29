@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const Surface = @import("Surface.zig");
+const Loop = @import("Loop.zig");
 
 const Pane = @This();
 
@@ -92,6 +93,13 @@ pub fn deinit(self: *Pane, gpa: std.mem.Allocator, io: std.Io) void {
         surface.destroy(gpa, io, self.closing != .rex_pane_closed);
     }
     self.* = undefined;
+}
+
+/// Give helper and terminal fds to the loop
+pub fn registerWith(self: *Pane, loop: *Loop) !void {
+    const surface = self.terminal_surface.?;
+    try loop.addRead(surface.helper_socket.socket.handle, self.token(.helper_socket));
+    try loop.addRead(surface.terminal.fd, self.token(.terminal));
 }
 
 const testing = std.testing;
