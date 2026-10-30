@@ -91,10 +91,10 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, base: []const u8, nvim_args: []co
 
     var loop: Loop = try .init();
     defer loop.deinit();
-    for ([_]std.c.SIG{ .TERM, .INT, .HUP }) |sig| try loop.addSignal(sig, Daemon.token_signal);
-    try loop.addRead(nvim.readFd(), Daemon.token_nvim);
-    try loop.addRead(server.socket.handle, Daemon.token_listener);
-    try loop.addRead(rex.fd(), Daemon.token_rex);
+    for ([_]std.c.SIG{ .TERM, .INT, .HUP }) |sig| try loop.addSignal(sig, @backingInt(Daemon.Token.signal));
+    try loop.addRead(nvim.readFd(), @backingInt(Daemon.Token.nvim_socket));
+    try loop.addRead(server.socket.handle, @backingInt(Daemon.Token.helper_listener));
+    try loop.addRead(rex.fd(), @backingInt(Daemon.Token.rex_socket));
 
     var d: Daemon = .{
         .allocator = gpa,
@@ -111,19 +111,8 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, base: []const u8, nvim_args: []co
     launch_owned = false;
     try d.start(launch);
 
-    var events: [16]Loop.Event = undefined;
-    while (d.end == null) {
-        var pending_accept = false;
-        for (try loop.wait(&events)) |e| {
-            if (e.token == Daemon.token_listener) pending_accept = true;
-            try d.handle(e);
-            if (d.end != null) break;
-        }
-        // between batches, so no stale event reaches a new pane
-        if (pending_accept and d.end == null) d.accept(&server) catch |err| std.debug.print("neorex daemon: a pane failed: {t}\n", .{err});
-        if (d.end == null) try d.afterBatch();
-    }
-    std.debug.print("neorex daemon: {t}\n", .{d.end.?});
+    const why = try d.run(&server);
+    std.debug.print("neorex daemon: {t}\n", .{why});
     // a clean end needs no log
     std.Io.Dir.cwd().deleteFile(io, log) catch {};
 }

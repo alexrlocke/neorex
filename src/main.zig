@@ -80,6 +80,7 @@ test {
     _ = @import("daemon/fdpass.zig");
     _ = @import("daemon/pane_helper.zig");
     _ = @import("daemon/Pane.zig");
+    _ = @import("daemon/Panes.zig");
     _ = @import("daemon/Surface.zig");
     _ = @import("daemon/Daemon.zig");
     _ = @import("term/modes.zig");
