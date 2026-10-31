@@ -113,18 +113,6 @@ fn handle(self: *Daemon, e: Loop.Event) !void {
     }
 }
 
-// Decode pane info from token, get the pane object, forward to
-// terminal or helper_socket handler depending on which fd the event came from
-fn onPane(self: *Daemon, pane_token: usize) !void {
-    const decoded = Pane.decodeToken(pane_token);
-    // pane might be gone
-    const pane = self.panes.byId(decoded.id) orelse return;
-    switch (decoded.source_fd) {
-        .helper_socket => try self.onHelper(pane),
-        .terminal => try self.onInput(pane),
-    }
-}
-
 /// After each batch of events: tells Neovim whether any pane has focus.
 fn afterBatch(self: *Daemon) !void {
     var known = false;
@@ -139,6 +127,8 @@ fn afterBatch(self: *Daemon) !void {
     try msgpack.writeBool(self.nvim.client.writer(), any);
     try self.nvim.client.flush();
 }
+
+// panes
 
 /// A new helper connected: match its hello to a pane waiting for it.
 fn accept(self: *Daemon, server: *net.Server) !void {
@@ -158,15 +148,112 @@ fn accept(self: *Daemon, server: *net.Server) !void {
     try self.draw();
 }
 
-/// No terminal yet: the smallest window, as Neovim allows.
-fn windowSize(p: *const Pane) [2]u32 {
-    return if (p.terminal_surface) |s| s.windowSize() else .{ 1, 1 };
+// Decode pane info from token, get the pane object, forward to
+// terminal or helper_socket handler depending on which fd the event came from
+fn onPane(self: *Daemon, pane_token: usize) !void {
+    const decoded = Pane.decodeToken(pane_token);
+    // pane might be gone
+    const pane = self.panes.byId(decoded.id) orelse return;
+    switch (decoded.source_fd) {
+        .helper_socket => try self.onHelper(pane),
+        .terminal => try self.onInput(pane),
+    }
 }
 
-/// The pane showing Neovim's current window; before setup, the launcher's.
-fn focusedPane(self: *const Daemon) ?*Pane {
-    if (self.nvim.current_win == 0) return self.panes.byId(startup_pane_id);
-    return self.panes.byWin(self.nvim.current_win);
+fn onHelper(self: *Daemon, pane: *Pane) !void {
+    var buf: [64]u8 = undefined;
+    const surface = pane.terminal_surface.?;
+    const n = std.posix.read(surface.helper_socket.socket.handle, &buf) catch 0;
+    if (n == 0) return self.paneGone(pane);
+
+    for (buf[0..n]) |byte| switch (pane_helper.Message.fromByte(byte)) {
+        .resized => return self.handleResize(pane),
+        .hello => {},
+        _ => {},
+    };
+}
+
+fn handleResize(self: *Daemon, pane: *Pane) !void {
+    const surface = pane.terminal_surface.?;
+    const window_size = surface.terminal.size() catch return self.paneGone(pane);
+    surface.view.resize(window_size.col, window_size.row);
+    try self.sizeWindow(pane);
+    if (pane == self.focusedPane()) try self.nvim.fitUiTo(pane);
+    try self.nvim.client.flush();
+    try self.draw();
+}
+
+fn onInput(self: *Daemon, pane: *Pane) !void {
+    var buf: [4096]u8 = undefined;
+    const surface = pane.terminal_surface.?;
+    const n = std.posix.read(surface.terminal.fd, &buf) catch 0;
+    if (n == 0) return self.paneGone(pane);
+
+    const bytes = buf[0..n];
+    if (self.typedIntoUnfocusedPane(pane, bytes)) {
+        try self.makeCurrent(pane);
+        try self.rex.focus(pane);
+    }
+
+    surface.forwarder.grid = self.gridOfPane(pane) orelse 0;
+    _ = try surface.forwarder.feed(self.nvim.client, bytes);
+}
+
+/// Typed into a pane Rex hasn't focused, as `rex send` can. Focus reports
+/// don't count: Rex sends them as it moves focus away.
+fn typedIntoUnfocusedPane(self: *const Daemon, pane: *const Pane, bytes: []const u8) bool {
+    const win = pane.neovim_window_handle orelse return false;
+    return win != self.nvim.current_win and
+        !self.rex.hasFocused(pane) and
+        !input.onlyFocusReports(bytes);
+}
+
+fn newPane(self: *Daemon, win: i64) !void {
+    const sp = self.changes.splitOf(win);
+    // beside the window it came from, else any pane Rex knows
+    // a copy: appending below can move every pane
+    const anchor: Pane.RexBlock = blk: {
+        if (self.splitFrom(sp)) |f| if (f.rex_block) |b| break :blk b;
+        for (self.panes.list.items) |q| if (q.rex_block) |b| break :blk b;
+        return; // no anchor yet: next flush
+    };
+    const pane_id = (try self.panes.addForWindow(self.gpa, win)).id;
+    self.changes.forgetSplit(win);
+
+    var id_buf: [16]u8 = undefined;
+    const id = try std.fmt.bufPrint(&id_buf, "{d}", .{pane_id});
+    try self.rex.request(.split, pane_id, "session.new_split", .{
+        .session_id = self.rex.session_id,
+        .anchor_id = @as([]const u8, &anchor),
+        .direction = if (sp.side_by_side) "horizontal" else "vertical",
+        .side = if (sp.before) "before" else "after",
+        .layout = .{ .block = .{
+            .flavor = "com.superlogical.terminal.shell",
+            .label = "neorex",
+            .options = .{ .shell = "none", .command = &[_][]const u8{ self.exe, "pane", self.sock, id } },
+        } },
+    });
+}
+
+/// The helper or terminal went away: Rex closed the pane. Close its
+/// window, or end if it was the last pane.
+fn paneGone(self: *Daemon, p: *Pane) !void {
+    p.closing = .rex_pane_closed;
+    const i = self.panes.indexOf(p.id).?;
+    var others = false;
+    for (self.panes.list.items) |q| {
+        if (q.id != p.id and q.closing != .request_failed) others = true;
+    }
+    if (!others) {
+        self.stop(.pane_gone);
+        return;
+    }
+    const maybe_win = p.neovim_window_handle;
+    self.panes.remove(self.gpa, self.io, i);
+    const win = maybe_win orelse return;
+    try self.changes.markClosing(self.gpa, win);
+    try windows.close(self.nvim.client, win);
+    try self.nvim.client.flush();
 }
 
 // Neovim
@@ -284,154 +371,6 @@ fn splitFrom(self: *const Daemon, sp: windows.Split) ?*Pane {
     return self.focusedPane();
 }
 
-/// Asks Neovim for the window to fit the pane, unless it already was.
-fn sizeWindow(self: *Daemon, p: *Pane) !void {
-    const s = p.terminal_surface orelse return;
-    const win = p.neovim_window_handle orelse return;
-    const grid = self.grids.gridOf(win) orelse return;
-    const size = s.windowSize();
-    const last = p.last_asked_win_size;
-    if (last.grid == grid and last.cols == size[0] and last.rows == size[1]) return;
-    p.last_asked_win_size = .{ .grid = grid, .cols = size[0], .rows = size[1] };
-    try windows.size(self.nvim.client, win, size[0], size[1]);
-}
-
-/// Draws every pane that changed.
-fn draw(self: *Daemon) !void {
-    const focused = self.focusedPane();
-    var i = self.panes.list.items.len;
-    while (i > 0) {
-        i -= 1;
-        // backwards, so removing this pane leaves the ones still to draw in place
-        const p = &self.panes.list.items[i];
-        const s = p.terminal_surface orelse continue;
-        const grid = self.gridOfPane(p);
-        const drawn = s.view.frame(&self.grids, grid, p == focused, &s.terminal.writer) catch false;
-        if (drawn) s.terminal.flush() catch try self.paneGone(p);
-    }
-    // drawn into one pane at most; done with them
-    if (self.grids.msg_grid) |id| if (self.grids.get(id)) |m| {
-        m.dirty.unsetAll();
-        m.scrolls_len = 0;
-    };
-    for (self.grids.wins.keys(), self.grids.wins.values()) |id, w| if (w.kind == .float) if (self.grids.get(id)) |f| {
-        f.dirty.unsetAll();
-        f.scrolls_len = 0;
-    };
-}
-
-// panes
-
-fn newPane(self: *Daemon, win: i64) !void {
-    const sp = self.changes.splitOf(win);
-    // beside the window it came from, else any pane Rex knows
-    // a copy: appending below can move every pane
-    const anchor: Pane.RexBlock = blk: {
-        if (self.splitFrom(sp)) |f| if (f.rex_block) |b| break :blk b;
-        for (self.panes.list.items) |q| if (q.rex_block) |b| break :blk b;
-        return; // no anchor yet: next flush
-    };
-    const pane_id = (try self.panes.addForWindow(self.gpa, win)).id;
-    self.changes.forgetSplit(win);
-
-    var id_buf: [16]u8 = undefined;
-    const id = try std.fmt.bufPrint(&id_buf, "{d}", .{pane_id});
-    try self.rex.request(.split, pane_id, "session.new_split", .{
-        .session_id = self.rex.session_id,
-        .anchor_id = @as([]const u8, &anchor),
-        .direction = if (sp.side_by_side) "horizontal" else "vertical",
-        .side = if (sp.before) "before" else "after",
-        .layout = .{ .block = .{
-            .flavor = "com.superlogical.terminal.shell",
-            .label = "neorex",
-            .options = .{ .shell = "none", .command = &[_][]const u8{ self.exe, "pane", self.sock, id } },
-        } },
-    });
-}
-
-/// The helper or terminal went away: Rex closed the pane. Close its
-/// window, or end if it was the last pane.
-fn paneGone(self: *Daemon, p: *Pane) !void {
-    p.closing = .rex_pane_closed;
-    const i = self.panes.indexOf(p.id).?;
-    var others = false;
-    for (self.panes.list.items) |q| {
-        if (q.id != p.id and q.closing != .request_failed) others = true;
-    }
-    if (!others) {
-        self.stop(.pane_gone);
-        return;
-    }
-    const maybe_win = p.neovim_window_handle;
-    self.panes.remove(self.gpa, self.io, i);
-    const win = maybe_win orelse return;
-    try self.changes.markClosing(self.gpa, win);
-    try windows.close(self.nvim.client, win);
-    try self.nvim.client.flush();
-}
-
-fn onHelper(self: *Daemon, pane: *Pane) !void {
-    var buf: [64]u8 = undefined;
-    const surface = pane.terminal_surface.?;
-    const n = std.posix.read(surface.helper_socket.socket.handle, &buf) catch 0;
-    if (n == 0) return self.paneGone(pane);
-
-    for (buf[0..n]) |byte| switch (pane_helper.Message.fromByte(byte)) {
-        .resized => return self.handleResize(pane),
-        .hello => {},
-        _ => {},
-    };
-}
-
-fn handleResize(self: *Daemon, pane: *Pane) !void {
-    const surface = pane.terminal_surface.?;
-    const window_size = surface.terminal.size() catch return self.paneGone(pane);
-    surface.view.resize(window_size.col, window_size.row);
-    try self.sizeWindow(pane);
-    if (pane == self.focusedPane()) try self.nvim.fitUiTo(pane);
-    try self.nvim.client.flush();
-    try self.draw();
-}
-
-fn onInput(self: *Daemon, pane: *Pane) !void {
-    var buf: [4096]u8 = undefined;
-    const surface = pane.terminal_surface.?;
-    const n = std.posix.read(surface.terminal.fd, &buf) catch 0;
-    if (n == 0) return self.paneGone(pane);
-
-    const bytes = buf[0..n];
-    if (self.typedIntoUnfocusedPane(pane, bytes)) {
-        try self.makeCurrent(pane);
-        try self.rex.focus(pane);
-    }
-
-    surface.forwarder.grid = self.gridOfPane(pane) orelse 0;
-    _ = try surface.forwarder.feed(self.nvim.client, bytes);
-}
-
-/// Makes the pane's window Neovim's current one, sized to the pane.
-fn makeCurrent(self: *Daemon, pane: *Pane) !void {
-    const win = pane.neovim_window_handle.?;
-    self.nvim.current_win = win;
-    self.nvim.current_win_req = try windows.setCurrent(self.nvim.client, win);
-    try self.nvim.fitUiTo(pane);
-}
-
-/// Typed into a pane Rex hasn't focused, as `rex send` can. Focus reports
-/// don't count: Rex sends them as it moves focus away.
-fn typedIntoUnfocusedPane(self: *const Daemon, pane: *const Pane, bytes: []const u8) bool {
-    const win = pane.neovim_window_handle orelse return false;
-    return win != self.nvim.current_win and
-        !self.rex.hasFocused(pane) and
-        !input.onlyFocusReports(bytes);
-}
-
-/// The grid showing the pane's window, if it has one yet.
-fn gridOfPane(self: *const Daemon, pane: *const Pane) ?u32 {
-    const win = pane.neovim_window_handle orelse return null;
-    return self.grids.gridOf(win);
-}
-
 // Rex
 
 fn onRex(self: *Daemon) !void {
@@ -464,4 +403,67 @@ fn onRexFocus(self: *Daemon, block: []const u8) !void {
     try self.makeCurrent(p);
     try self.nvim.client.flush();
     try self.draw();
+}
+
+// shared
+
+/// Draws every pane that changed.
+fn draw(self: *Daemon) !void {
+    const focused = self.focusedPane();
+    var i = self.panes.list.items.len;
+    while (i > 0) {
+        i -= 1;
+        // backwards, so removing this pane leaves the ones still to draw in place
+        const p = &self.panes.list.items[i];
+        const s = p.terminal_surface orelse continue;
+        const grid = self.gridOfPane(p);
+        const drawn = s.view.frame(&self.grids, grid, p == focused, &s.terminal.writer) catch false;
+        if (drawn) s.terminal.flush() catch try self.paneGone(p);
+    }
+    // drawn into one pane at most; done with them
+    if (self.grids.msg_grid) |id| if (self.grids.get(id)) |m| {
+        m.dirty.unsetAll();
+        m.scrolls_len = 0;
+    };
+    for (self.grids.wins.keys(), self.grids.wins.values()) |id, w| if (w.kind == .float) if (self.grids.get(id)) |f| {
+        f.dirty.unsetAll();
+        f.scrolls_len = 0;
+    };
+}
+
+/// Asks Neovim for the window to fit the pane, unless it already was.
+fn sizeWindow(self: *Daemon, p: *Pane) !void {
+    const s = p.terminal_surface orelse return;
+    const win = p.neovim_window_handle orelse return;
+    const grid = self.grids.gridOf(win) orelse return;
+    const size = s.windowSize();
+    const last = p.last_asked_win_size;
+    if (last.grid == grid and last.cols == size[0] and last.rows == size[1]) return;
+    p.last_asked_win_size = .{ .grid = grid, .cols = size[0], .rows = size[1] };
+    try windows.size(self.nvim.client, win, size[0], size[1]);
+}
+
+/// Makes the pane's window Neovim's current one, sized to the pane.
+fn makeCurrent(self: *Daemon, pane: *Pane) !void {
+    const win = pane.neovim_window_handle.?;
+    self.nvim.current_win = win;
+    self.nvim.current_win_req = try windows.setCurrent(self.nvim.client, win);
+    try self.nvim.fitUiTo(pane);
+}
+
+/// The pane showing Neovim's current window; before setup, the launcher's.
+fn focusedPane(self: *const Daemon) ?*Pane {
+    if (self.nvim.current_win == 0) return self.panes.byId(startup_pane_id);
+    return self.panes.byWin(self.nvim.current_win);
+}
+
+/// The grid showing the pane's window, if it has one yet.
+fn gridOfPane(self: *const Daemon, pane: *const Pane) ?u32 {
+    const win = pane.neovim_window_handle orelse return null;
+    return self.grids.gridOf(win);
+}
+
+/// No terminal yet: the smallest window, as Neovim allows.
+fn windowSize(p: *const Pane) [2]u32 {
+    return if (p.terminal_surface) |s| s.windowSize() else .{ 1, 1 };
 }
