@@ -31,10 +31,21 @@ pub const RexBlock = [42]u8;
 /// `layer:` and a UUID.
 pub const RexLayer = [42]u8;
 
+pub const Fit = union(enum) {
+    none,
+    /// The request's id.
+    asked: u32,
+    /// Answered: the next flush has the new layout.
+    answered,
+};
+
 pub const Layer = struct {
     group: FloatGroups.Group,
     /// Rex's id for it, once made.
     id: ?RexLayer = null,
+    /// Its floats being refitted to its first size: not drawn until Neovim
+    /// has answered and redrawn them, so the guessed size never shows.
+    fit: Fit = .none,
     /// Where it sits in the window, as fractions: x, y, w, h. What we asked
     /// for, until the user moves it.
     bounds: [4]f64 = .{ 0, 0, 0, 0 },
@@ -83,7 +94,12 @@ pub fn drawable(self: Pane) bool {
 
 /// A floating pane ready to draw its floats.
 pub fn layerShown(self: Pane) bool {
-    return self.layer != null and self.terminal_surface != null and self.closing == null;
+    return self.layer != null and self.terminal_surface != null and self.closing == null and self.layer.?.fit == .none;
+}
+
+/// A floating pane shown or on its way: its floats stay out of other panes.
+pub fn layerHides(self: Pane) bool {
+    return self.layer != null and self.closing == null;
 }
 
 pub const Part = enum { rex_block, terminal_surface, neovim_window };

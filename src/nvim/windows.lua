@@ -104,7 +104,8 @@ end
 
 --- Fits the floats hanging from editor floats `tops` to `w` x `h` at `row`,
 --- `col` on the screen, as their Rex floating pane was resized to. `cur` is
---- where they are now: row, col, width, height.
+--- where they are now: row, col, width, height. Returns whether it moved
+--- anything.
 function M.place_group(tops, row, col, w, h, cur)
   local set = {}
   for _, t in ipairs(tops) do set[t] = true end
@@ -117,15 +118,15 @@ function M.place_group(tops, row, col, w, h, cur)
         local o = l.opts.layout
         o.width, o.height, o.row, o.col = w, h, row, col
         l:update()
-        return
+        return true
       end
     end
   end
   -- one float on its own grows by what its pane grew
-  if #tops ~= 1 or not api.nvim_win_is_valid(tops[1]) then return end
+  if #tops ~= 1 or not api.nvim_win_is_valid(tops[1]) then return false end
   local win = tops[1]
   local c = api.nvim_win_get_config(win)
-  if c.relative ~= 'editor' then return end
+  if c.relative ~= 'editor' then return false end
   api.nvim_win_set_config(win, {
     relative = 'editor',
     row = c.row + row - cur[1],
@@ -133,6 +134,7 @@ function M.place_group(tops, row, col, w, h, cur)
     width = math.max(1, c.width + w - cur[3]),
     height = math.max(1, c.height + h - cur[4]),
   })
+  return true
 end
 
 -- the layout node holding `win`: 'row' or 'col', and whether `win` is first

@@ -11,6 +11,7 @@ const Value = std.json.Value;
 const input = @import("../term/input.zig");
 const Nvim = @import("../nvim/Nvim.zig");
 const msgpack = @import("../nvim/msgpack.zig");
+const rpc = @import("../nvim/rpc.zig");
 const windows = @import("../nvim/windows.zig");
 const Grids = @import("../screen/Grids.zig");
 const FloatGroups = @import("../screen/FloatGroups.zig");
@@ -84,6 +85,12 @@ pub const token_signal = 0;
 pub const token_nvim = 1;
 pub const token_listener = 2;
 pub const token_rex = 3;
+pub const token_focus_timer = 4;
+
+/// How long losing focus waits before Neovim hears of it: focus moving
+/// from one pane to another, such as into a floating pane, arrives as an
+/// out then an in, and shouldn't fire FocusLost and FocusGained.
+const focus_out_delay_ms = 80;
 
 /// The id `Pane.startup` gives the pane neorex was run in.
 const startup_pane_id = 0;
@@ -150,6 +157,7 @@ pub fn handle(self: *Daemon, e: Loop.Event) !void {
             self.end = .nvim_exited;
         },
         token_rex => try self.onRex(),
+        token_focus_timer => try self.sendFocus(true),
         token_listener => {},
         else => {
             const t = Pane.fromToken(e.token);
@@ -164,7 +172,12 @@ pub fn handle(self: *Daemon, e: Loop.Event) !void {
 }
 
 /// After each batch of events: tells Neovim whether any pane has focus.
+/// Losing it waits a moment, in case another pane gains it.
 pub fn afterBatch(self: *Daemon) !void {
+    try self.sendFocus(false);
+}
+
+fn sendFocus(self: *Daemon, waited: bool) !void {
     var known = false;
     var any = false;
     for (self.panes.items) |p| if (p.terminal_surface) |s| if (s.forwarder.focused) |f| {
@@ -172,6 +185,7 @@ pub fn afterBatch(self: *Daemon) !void {
         any = any or f;
     };
     if (!known or any == self.ui_focused) return;
+    if (!any and !waited) return self.loop.addTimer(token_focus_timer, focus_out_delay_ms, token_focus_timer);
     self.ui_focused = any;
     _ = try self.nvim.request("nvim_ui_set_focus", 1);
     try msgpack.writeBool(self.nvim.writer(), any);
@@ -206,7 +220,9 @@ pub fn accept(self: *Daemon, server: *net.Server) !void {
     };
     try pane.registerWith(self.loop);
     try self.sizeWindow(pane);
-    try self.followLayer(pane);
+    if (pane.layer) |*l| if (try self.followLayer(pane)) |req| {
+        l.fit = .{ .asked = req };
+    };
     try self.nvim.flush();
     try self.draw();
 }
@@ -262,6 +278,15 @@ fn onNvim(self: *Daemon) !bool {
         .response => |r| {
             var result = r.result;
             if (r.id == self.current_req) self.current_req = null;
+            var show_now = false;
+            for (self.panes.items) |*p| if (p.layer) |*l| if (l.fit == .asked and l.fit.asked == r.id) {
+                // nothing moved, so no redraw is coming: show it now
+                var res = r.result;
+                const moved = r.err == null and (rpc.expectBool(&res) catch false);
+                l.fit = if (moved) .answered else .none;
+                show_now = !moved;
+            };
+            if (show_now) try self.draw();
             if (r.err) |e| {
                 std.debug.print("neovim error: {s}\n", .{e});
             } else if (r.id == self.chan_req) {
@@ -359,6 +384,10 @@ fn setRexFocused(self: *Daemon, block: []const u8) !void {
 /// are made external, and panes whose windows closed hang up.
 fn reconcile(self: *Daemon) !void {
     if (!self.ready) return;
+    // this flush has the refitted floats
+    for (self.panes.items) |*p| if (p.layer) |*l| if (l.fit == .answered) {
+        l.fit = .none;
+    };
     var i = self.panes.items.len;
     while (i > 0) {
         i -= 1;
@@ -491,22 +520,23 @@ fn sameBounds(self: *const Daemon, a: [4]f64, b: [4]f64) bool {
 }
 
 /// Fits a floating pane's floats to where it is and the size Rex gave it.
-fn followLayer(self: *Daemon, p: *Pane) !void {
-    const l = if (p.layer) |*l| l else return;
-    const s = p.terminal_surface orelse return;
-    const screen = self.grids.get(1) orelse return;
+/// Returns the request's id, if it sent one.
+fn followLayer(self: *Daemon, p: *Pane) !?u32 {
+    const l = if (p.layer) |*l| l else return null;
+    const s = p.terminal_surface orelse return null;
+    const screen = self.grids.get(1) orelse return null;
     const row: i32 = @as(i32, @intFromFloat(@round(l.bounds[1] * @as(f64, @floatFromInt(screen.height))))) + @divFloor(layer_frame[1], 2);
     const col: i32 = @as(i32, @intFromFloat(@round(l.bounds[0] * @as(f64, @floatFromInt(screen.width))))) + @divFloor(layer_frame[0], 2);
     const g = l.group;
-    if (row == g.row and col == g.col and s.view.cols == g.width and s.view.rows == g.height) return;
+    if (row == g.row and col == g.col and s.view.cols == g.width and s.view.rows == g.height) return null;
     var wins: [16]i64 = undefined;
     var n: usize = 0;
     for (g.topGrids()) |top| if (self.grids.winOn(top)) |w| {
         wins[n] = w.win;
         n += 1;
     };
-    if (n == 0) return;
-    try windows.placeGroup(self.nvim, wins[0..n], row, col, s.view.cols, s.view.rows, .{ g.row, g.col, g.width, g.height });
+    if (n == 0) return null;
+    return try windows.placeGroup(self.nvim, wins[0..n], row, col, s.view.cols, s.view.rows, .{ g.row, g.col, g.width, g.height });
 }
 
 /// A pane kept for a reopened window.
@@ -553,7 +583,7 @@ fn draw(self: *Daemon) !void {
     // floats in floating panes stay out of the others
     var skip_buf: [FloatGroups.max_groups * 16]u32 = undefined;
     var skip_n: usize = 0;
-    for (self.panes.items) |p| if (p.layerShown()) for (p.layer.?.group.topGrids()) |t| {
+    for (self.panes.items) |p| if (p.layerHides()) for (p.layer.?.group.topGrids()) |t| {
         if (skip_n == skip_buf.len) break;
         skip_buf[skip_n] = t;
         skip_n += 1;
@@ -564,6 +594,8 @@ fn draw(self: *Daemon) !void {
         // backwards, so removing this pane leaves the ones still to draw in place
         const p = &self.panes.items[i];
         const s = p.terminal_surface orelse continue;
+        // a floating pane waiting on its refit shows nothing yet
+        if (p.layer != null and !p.layerShown()) continue;
         const drawn = if (p.layer) |*l| blk: {
             var mbuf: [Grids.max_floats]Grids.Placed = undefined;
             const members = FloatGroups.members(&self.grids, &l.group, &mbuf);
@@ -680,7 +712,7 @@ fn onHelper(self: *Daemon, p: *Pane) !void {
     const ws = s.terminal.size() catch return self.paneGone(p);
     s.view.resize(ws.col, ws.row);
     try self.sizeWindow(p);
-    try self.followLayer(p);
+    _ = try self.followLayer(p);
     if (p == self.focusedPane()) try self.followFocus(p);
     try self.nvim.flush();
     try self.draw();
@@ -839,7 +871,7 @@ fn readLayerBounds(self: *Daemon, layer: Value) void {
     const l = if (p.layer) |*l| l else return;
     if (self.sameBounds(bounds, l.bounds)) return;
     l.bounds = bounds;
-    self.followLayer(p) catch {};
+    _ = self.followLayer(p) catch {};
 }
 
 /// Finds our panes' blocks under layout node `node` and keeps their rects.
