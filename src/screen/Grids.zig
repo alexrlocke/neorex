@@ -49,6 +49,8 @@ pub const Float = struct {
     row: f64 = 0,
     col: f64 = 0,
     zindex: u32 = 50,
+    /// Takes the mouse; Neovim sets this for focusable floats.
+    focusable: bool = true,
     /// Neovim's drawing order among equal zindexes.
     compindex: u32 = 0,
     /// Where Neovim put it on grid 1, kept inside the screen.
@@ -64,7 +66,16 @@ pub const Placed = struct {
     col: i32,
     zindex: u32,
     compindex: u32,
+    /// On the screen (grid 1 or the message grid), not over a window.
+    on_screen: bool = false,
+    /// On the message grid, which shows at the bottom.
+    on_msg: bool = false,
+    /// The editor-relative float it hangs from, itself included; 0 if none.
+    top: u32 = 0,
 };
+
+/// Where a float sits on the grid under it all.
+pub const Place = struct { root: u32, row: i32, col: i32, top: u32 };
 
 /// Most floats drawn over one pane.
 pub const max_floats = 16;
@@ -94,46 +105,57 @@ pub fn winOn(self: *const Grids, grid: u32) ?Win {
 }
 
 /// The floats over grid `base`, and over the screen too if `screen`
-/// (floats on grid 1 and the message grid), lowest first.
-pub fn floatsOver(self: *const Grids, base: u32, screen: bool, out: *[max_floats]Placed) []Placed {
+/// (floats on grid 1 and the message grid), lowest first. Floats hanging
+/// from an editor float in `skip` are left out.
+pub fn floatsOver(self: *const Grids, base: u32, screen: bool, skip: []const u32, out: *[max_floats]Placed) []Placed {
     var n: usize = 0;
     for (self.wins.keys(), self.wins.values()) |id, w| {
         if (w.kind != .float or n == out.len) continue;
-        const p = self.place(id, w.float) orelse continue;
+        const p = self.place(id) orelse continue;
+        if (p.top != 0 and std.mem.indexOfScalar(u32, skip, p.top) != null) continue;
         const on_screen = p.root == 1 or p.root == self.msg_grid;
         if (p.root != base and !(screen and on_screen)) continue;
-        out[n] = .{ .grid = id, .row = p.row, .col = p.col, .zindex = w.float.zindex, .compindex = w.float.compindex };
+        out[n] = .{ .grid = id, .row = p.row, .col = p.col, .zindex = w.float.zindex, .compindex = w.float.compindex, .on_screen = on_screen, .on_msg = p.root == self.msg_grid, .top = p.top };
         n += 1;
     }
     const placed = out[0..n];
+    sortPlaced(placed);
+    return placed;
+}
+
+/// Lowest first, as Neovim stacks them.
+pub fn sortPlaced(placed: []Placed) void {
     std.mem.sort(Placed, placed, {}, struct {
         fn lt(_: void, a: Placed, b: Placed) bool {
             return if (a.zindex != b.zindex) a.zindex < b.zindex else a.compindex < b.compindex;
         }
     }.lt);
-    return placed;
 }
 
-/// Where float `id` sits on the grid under it all: floats can float over floats.
-fn place(self: *const Grids, id: u32, f: Float) ?struct { root: u32, row: i32, col: i32 } {
+/// Where float grid `id` sits on the grid under it all: floats can float over floats.
+pub fn place(self: *const Grids, id: u32) ?Place {
+    const w = self.wins.get(id) orelse return null;
+    if (w.kind != .float) return null;
     var row: i32 = 0;
     var col: i32 = 0;
     var grid = id;
-    var float = f;
+    var float = w.float;
+    var top: u32 = 0;
     for (0..8) |_| {
         const g = self.get(grid) orelse return null;
-        if (float.anchor_grid == 1) if (float.screen) |pos| {
-            return .{ .root = 1, .row = row + pos[0], .col = col + pos[1] };
-        };
+        if (float.anchor_grid == 1) {
+            top = grid;
+            if (float.screen) |pos| return .{ .root = 1, .row = row + pos[0], .col = col + pos[1], .top = top };
+        }
         row += @as(i32, @intFromFloat(@floor(float.row))) - if (float.anchor == .sw or float.anchor == .se) @as(i32, @intCast(g.height)) else 0;
         col += @as(i32, @intFromFloat(@floor(float.col))) - if (float.anchor == .ne or float.anchor == .se) @as(i32, @intCast(g.width)) else 0;
         grid = float.anchor_grid;
         const under = self.wins.get(grid) orelse {
             // the message grid sits on grid 1 at msg_row
-            if (grid == self.msg_grid) return .{ .root = grid, .row = row + @as(i32, @intCast(self.msg_row)), .col = col };
-            return .{ .root = grid, .row = row, .col = col };
+            if (grid == self.msg_grid) return .{ .root = grid, .row = row + @as(i32, @intCast(self.msg_row)), .col = col, .top = top };
+            return .{ .root = grid, .row = row, .col = col, .top = top };
         };
-        if (under.kind != .float) return .{ .root = grid, .row = row, .col = col };
+        if (under.kind != .float) return .{ .root = grid, .row = row, .col = col, .top = top };
         float = under.float;
     }
     return null;
@@ -275,7 +297,7 @@ fn apply(self: *Grids, gpa: Allocator, event: Event, d: *msgpack.Decoder, len: u
             f.anchor_grid = try expectInt(d, u32);
             f.row = try expectNumber(d);
             f.col = try expectNumber(d);
-            _ = try rpc.expectBool(d); // mouse
+            f.focusable = try rpc.expectBool(d);
             f.zindex = try expectInt(d, u32);
             if (len < 11) {
                 try self.wins.put(gpa, id, .{ .win = win, .kind = kind, .float = f });
@@ -716,11 +738,35 @@ test "floats are placed over the grid under them" {
         }
     }.f);
     var buf: [max_floats]Placed = undefined;
-    const over = gs.floatsOver(2, false, &buf);
+    const over = gs.floatsOver(2, false, &.{}, &buf);
     try testing.expectEqual(2, over.len);
     try testing.expectEqual(Placed{ .grid = 4, .row = 5, .col = 7, .zindex = 40, .compindex = 0 }, over[0]);
     try testing.expectEqual(Placed{ .grid = 3, .row = 4, .col = 6, .zindex = 50, .compindex = 0 }, over[1]);
-    const all = gs.floatsOver(2, true, &buf);
+    const all = gs.floatsOver(2, true, &.{}, &buf);
     try testing.expectEqual(3, all.len);
-    try testing.expectEqual(Placed{ .grid = 5, .row = 7, .col = 2, .zindex = 50, .compindex = 0 }, all[2]);
+    try testing.expectEqual(Placed{ .grid = 5, .row = 7, .col = 2, .zindex = 50, .compindex = 0, .on_screen = true, .top = 5 }, all[2]);
+    // left out with the editor float it hangs from
+    try testing.expectEqual(2, gs.floatsOver(2, true, &.{5}, &buf).len);
+}
+
+test "floats over an editor float hang from it" {
+    var gs: Grids = .{};
+    defer gs.deinit(testing.allocator);
+    _ = try applyTest(&gs, struct {
+        fn f(w: *Writer) !void {
+            try msgpack.writeArrayHeader(w, 6);
+            try ev(w, "grid_resize", &.{ 3, 20, 8 });
+            try ev(w, "grid_resize", &.{ 4, 10, 1 });
+            try ev(w, "grid_resize", &.{ 5, 4, 2 });
+            // a box on the screen, an input inside it, the pair on a third
+            try floatEvent(w, 3, "NW", 1, 2, 5, 50, .{ 2, 5 });
+            try floatEvent(w, 4, "NW", 3, 1, 1, 51, null);
+            try floatEvent(w, 5, "NW", 4, 0, 2, 52, null);
+        }
+    }.f);
+    try testing.expectEqual(Place{ .root = 1, .row = 2, .col = 5, .top = 3 }, gs.place(3).?);
+    try testing.expectEqual(Place{ .root = 1, .row = 3, .col = 6, .top = 3 }, gs.place(4).?);
+    try testing.expectEqual(Place{ .root = 1, .row = 3, .col = 8, .top = 3 }, gs.place(5).?);
+    var buf: [max_floats]Placed = undefined;
+    try testing.expectEqual(0, gs.floatsOver(1, true, &.{3}, &buf).len);
 }

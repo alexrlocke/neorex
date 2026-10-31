@@ -4,6 +4,7 @@
 const std = @import("std");
 const Surface = @import("Surface.zig");
 const Loop = @import("Loop.zig");
+const FloatGroups = @import("../screen/FloatGroups.zig");
 
 const Pane = @This();
 
@@ -15,6 +16,10 @@ neovim_window_handle: ?NeovimWindowHandle = null,
 /// Owned.
 terminal_surface: ?*Surface = null,
 closing: ?Close = null,
+/// Set for a Rex floating pane showing a group of floats, not a window.
+layer: ?Layer = null,
+/// Where Rex put the pane in its window, as fractions: x, y, w, h.
+rect: ?[4]f64 = null,
 last_asked_win_size: struct { grid: u32 = 0, cols: u32 = 0, rows: u32 = 0 } = .{},
 
 /// Never 0: Neovim's API reads 0 as the current window.
@@ -22,6 +27,18 @@ pub const NeovimWindowHandle = i64;
 
 /// `block:` and a UUID.
 pub const RexBlock = [42]u8;
+
+/// `layer:` and a UUID.
+pub const RexLayer = [42]u8;
+
+pub const Layer = struct {
+    group: FloatGroups.Group,
+    /// Rex's id for it, once made.
+    id: ?RexLayer = null,
+    /// Where it sits in the window, as fractions: x, y, w, h. What we asked
+    /// for, until the user moves it.
+    bounds: [4]f64 = .{ 0, 0, 0, 0 },
+};
 
 pub fn rexBlock(id: []const u8) error{BadRexBlock}!RexBlock {
     if (id.len != 42) return error.BadRexBlock;
@@ -42,6 +59,11 @@ pub fn fromNeovimWindow(id: u32, window_handle: NeovimWindowHandle) Pane {
     return .{ .id = id, .neovim_window_handle = window_handle };
 }
 
+/// A Rex floating pane for a group of floats.
+pub fn fromGroup(id: u32, group: FloatGroups.Group) Pane {
+    return .{ .id = id, .layer = .{ .group = group } };
+}
+
 /// e.g. Cmd+D. Not used yet.
 pub fn fromRexPane(id: u32, block: RexBlock, surface: *Surface) Pane {
     return .{ .id = id, .rex_block = block, .terminal_surface = surface };
@@ -57,6 +79,11 @@ pub fn drawable(self: Pane) bool {
     return self.neovim_window_handle != null and
         self.terminal_surface != null and
         self.closing == null;
+}
+
+/// A floating pane ready to draw its floats.
+pub fn layerShown(self: Pane) bool {
+    return self.layer != null and self.terminal_surface != null and self.closing == null;
 }
 
 pub const Part = enum { rex_block, terminal_surface, neovim_window };

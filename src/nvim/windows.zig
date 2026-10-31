@@ -35,6 +35,21 @@ pub fn size(nvim: *Nvim, win: i64, cols: u32, rows: u32) !void {
     try msgpack.writeInt(nvim.writer(), @max(rows, 1));
 }
 
+/// Fits the floats hanging from editor floats `tops` to `w` x `h` at `row`,
+/// `col`; `cur` is where they are now: row, col, width, height.
+pub fn placeGroup(nvim: *Nvim, tops: []const i64, row: i32, col: i32, w: u32, h: u32, cur: [4]i64) !void {
+    _ = try nvim.execLua("neorex.place_group(...)", 6);
+    const wr = nvim.writer();
+    try msgpack.writeArrayHeader(wr, @intCast(tops.len));
+    for (tops) |t| try msgpack.writeInt(wr, t);
+    try msgpack.writeInt(wr, row);
+    try msgpack.writeInt(wr, col);
+    try msgpack.writeInt(wr, @max(w, 1));
+    try msgpack.writeInt(wr, @max(h, 1));
+    try msgpack.writeArrayHeader(wr, 4);
+    for (cur) |v| try msgpack.writeInt(wr, v);
+}
+
 /// Closes `win`, keeping unsaved changes in its buffer.
 pub fn close(nvim: *Nvim, win: i64) !void {
     _ = try nvim.execLua("neorex.close(...)", 1);
@@ -61,6 +76,8 @@ pub const Note = union(enum) {
     reopen: i64,
     /// A new window, and where Neovim put it.
     split: Split,
+    /// The current window is now this float.
+    float: i64,
 };
 
 /// Where a new window sits in Neovim's layout.
@@ -82,6 +99,8 @@ pub fn parseNote(method: []const u8, params: *msgpack.Decoder) !?Note {
         .reopen
     else if (std.mem.eql(u8, method, "neorex_split"))
         .split
+    else if (std.mem.eql(u8, method, "neorex_float"))
+        .float
     else
         return null;
     if (try rpc.expectArray(params) < if (tag == .split) @as(u32, 4) else 1) return error.BadMessage;
@@ -89,6 +108,7 @@ pub fn parseNote(method: []const u8, params: *msgpack.Decoder) !?Note {
     return switch (tag) {
         .current => .{ .current = win },
         .reopen => .{ .reopen = win },
+        .float => .{ .float = win },
         .split => .{ .split = .{
             .win = win,
             .side_by_side = try rpc.expectBool(params),

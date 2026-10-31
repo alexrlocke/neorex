@@ -383,7 +383,7 @@ const Multi = struct {
                         if (try m.gs.applyRedraw(gpa, &params)) try m.flushed();
                     } else if (try windows.parseNote(n.method, &params)) |note| switch (note) {
                         .current => |w| m.current = w,
-                        .reopen, .split => {},
+                        .reopen, .split, .float => {},
                     };
                 },
                 .response => |r| {
@@ -432,7 +432,7 @@ const Multi = struct {
         if (grid) |id| m.stats.scrolls += m.gs.get(id).?.pendingScrolls().len;
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
-        _ = try p.view.frame(&m.gs, grid, focused, &out.writer);
+        _ = try p.view.frame(&m.gs, grid, .{ .focused = focused }, &out.writer);
         feed(&p.t, out.written());
 
         const v = &p.view;
@@ -446,7 +446,7 @@ const Multi = struct {
         if (grid) |id| {
             const g = m.gs.get(id).?;
             grid_rows = @min(g.height, msg_top);
-            placed = m.gs.floatsOver(id, focused, &placed_buf);
+            placed = m.gs.floatsOver(id, focused, &.{}, &placed_buf);
             m.stats.floats += placed.len;
             var shown = try overlay(&m.gs, g, placed, grid_rows, v.cols);
             defer shown.deinit(gpa);
@@ -583,5 +583,5 @@ test "live neovim with a pane per window" {
     try testing.expect(m.stats.float_cursor > 0);
     // all closed
     var placed_buf: [Grids.max_floats]Grids.Placed = undefined;
-    for (m.panes) |p| try testing.expectEqual(0, m.gs.floatsOver(m.gs.gridOf(p.win).?, true, &placed_buf).len);
+    for (m.panes) |p| try testing.expectEqual(0, m.gs.floatsOver(m.gs.gridOf(p.win).?, true, &.{}, &placed_buf).len);
 }

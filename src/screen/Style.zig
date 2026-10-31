@@ -21,6 +21,16 @@ cursor_style_enabled: bool = false,
 mode_idx: u32 = 0,
 /// Between busy_start and busy_stop, the cursor is hidden.
 busy: bool = false,
+/// Highlights made by blending a float over what's under it, with ids
+/// from `blend_base`. Good for one frame: cleared by `clearBlends`.
+blended: [max_blended]Blended = undefined,
+blended_len: u16 = 0,
+
+/// Ids from here are blended highlights, never Neovim's.
+pub const blend_base: u32 = 1 << 31;
+const max_blended = 512;
+
+const Blended = struct { front: u32, back: u32, through: bool, attr: Attr };
 
 pub const CursorMode = struct {
     shape: Shape = .block,
@@ -58,7 +68,55 @@ pub fn deinit(self: *Style, gpa: Allocator) void {
 
 /// Highlight `hl`, or the default for an id never defined.
 pub fn attr(self: *const Style, hl: u32) Attr {
+    if (hl >= blend_base) {
+        const i = hl - blend_base;
+        return if (i < self.blended_len) self.blended[i].attr else .{};
+    }
     return if (hl < self.attrs.items.len) self.attrs.items[hl] else .{};
+}
+
+/// Forgets the blended highlights; call at the start of each frame.
+pub fn clearBlends(self: *Style) void {
+    self.blended_len = 0;
+}
+
+/// Float highlight `front` over `back`, as Neovim's compositor blends them
+/// by `front`'s blend. `through`: the float's cell is blank and `back`'s
+/// text shows. Just `front` when it doesn't blend or colors are unknown.
+pub fn blendOver(self: *Style, front: u32, back: u32, through: bool) u32 {
+    const f = self.attr(front);
+    if (f.blend == 0) return front;
+    for (self.blended[0..self.blended_len], 0..) |b, i| {
+        if (b.front == front and b.back == back and b.through == through) return blend_base + @as(u32, @intCast(i));
+    }
+    if (self.blended_len == max_blended) return front;
+    const b = self.attr(back);
+    const fbg = f.bg orelse self.default_bg orelse return front;
+    // null on a transparent background: it stays transparent
+    const bbg = b.bg orelse self.default_bg;
+    var a = f;
+    if (through) {
+        a = b;
+        a.fg = mix(f.blend, b.fg orelse self.default_fg orelse return front, fbg);
+        if (b.sp) |sp| a.sp = mix(f.blend, sp, fbg);
+    }
+    a.bg = if (bbg) |bg| mix(f.blend, bg, fbg) else null;
+    a.blend = 0;
+    self.blended[self.blended_len] = .{ .front = front, .back = back, .through = through, .attr = a };
+    self.blended_len += 1;
+    return blend_base + self.blended_len - 1;
+}
+
+/// `ratio` percent of `back`, the rest `front`, per channel.
+fn mix(ratio: u8, back: u24, front: u24) u24 {
+    const r: u32 = @min(ratio, 100);
+    var out: u24 = 0;
+    inline for (.{ 16, 8, 0 }) |shift| {
+        const cb: u32 = (back >> shift) & 0xff;
+        const cf: u32 = (front >> shift) & 0xff;
+        out |= @as(u24, @intCast((r * cb + (100 - r) * cf) / 100)) << shift;
+    }
+    return out;
 }
 
 /// How the cursor should look now; null to leave it alone.
@@ -213,4 +271,40 @@ fn expectColor(d: *msgpack.Decoder) !?u24 {
     const n = try rpc.expectInt(d);
     if (n == -1) return null;
     return std.math.cast(u24, n) orelse error.BadMessage;
+}
+
+test "a float blends over what's under it" {
+    var style: Style = .{ .default_fg = 0xffffff, .default_bg = 0x000000 };
+    defer style.deinit(std.testing.allocator);
+    try style.attrs.appendSlice(std.testing.allocator, &.{
+        .{},
+        .{ .bg = 0x000000, .blend = 60 },
+        .{ .fg = 0x6464c8, .bg = 0xc86464 },
+        .{ .bg = 0x0000ff },
+        .{ .fg = 0xaaaaaa },
+    });
+    // no blend: unchanged
+    try std.testing.expectEqual(@as(u32, 3), style.blendOver(3, 2, false));
+
+    const through = style.blendOver(1, 2, true);
+    try std.testing.expect(through >= blend_base);
+    const t = style.attr(through);
+    try std.testing.expectEqual(@as(?u24, 0x3c3c78), t.fg);
+    try std.testing.expectEqual(@as(?u24, 0x783c3c), t.bg);
+    try std.testing.expectEqual(@as(u8, 0), t.blend);
+    // the same pair again: the same id
+    try std.testing.expectEqual(through, style.blendOver(1, 2, true));
+
+    const solid = style.attr(style.blendOver(1, 2, false));
+    try std.testing.expectEqual(@as(?u24, null), solid.fg);
+    try std.testing.expectEqual(@as(?u24, 0x783c3c), solid.bg);
+
+    style.clearBlends();
+    try std.testing.expectEqual(@as(u16, 0), style.blended_len);
+
+    // a transparent background: text still dims, the background stays clear
+    style.default_bg = null;
+    const clear = style.attr(style.blendOver(1, 4, true));
+    try std.testing.expectEqual(@as(?u24, 0x666666), clear.fg);
+    try std.testing.expectEqual(@as(?u24, null), clear.bg);
 }

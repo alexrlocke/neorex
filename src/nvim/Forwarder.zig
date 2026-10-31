@@ -15,10 +15,44 @@ paste_phase: i64 = 1,
 ctrl_q_quits: bool = true,
 /// The grid mouse events land on; 0 without ext_multigrid.
 grid: u32 = 0,
+/// Floats drawn over the terminal, lowest first: mouse events on one go
+/// to its grid.
+targets: [max_targets]Target = undefined,
+targets_len: u8 = 0,
+/// The float a button went down on: its drags and release go there too.
+grab: ?Target = null,
 /// Off when the caller tells Neovim about focus itself, from `focused`.
 send_focus: bool = true,
 /// The last focus report seen.
 focused: ?bool = null,
+
+/// A float's grid and where it's drawn, in terminal cells.
+pub const Target = struct { grid: u32, row: i32, col: i32, width: u32, height: u32 };
+
+pub const max_targets = 16;
+
+pub fn setTargets(self: *Forwarder, targets: []const Target) void {
+    const n = @min(targets.len, max_targets);
+    @memcpy(self.targets[0..n], targets[0..n]);
+    self.targets_len = @intCast(n);
+}
+
+/// The grid a mouse event lands on, and where on it.
+fn route(self: *Forwarder, m: input.Mouse) struct { grid: u32, row: u16, col: u16 } {
+    const held = m.action == .drag or m.action == .release;
+    const hit: ?Target = if (held and self.grab != null) self.grab else for (0..self.targets_len) |j| {
+        const t = self.targets[self.targets_len - 1 - j];
+        if (m.row >= t.row and m.row < @as(i64, t.row) + t.height and m.col >= t.col and m.col < @as(i64, t.col) + t.width) break t;
+    } else null;
+    if (m.action == .press and m.button != .wheel_up and m.button != .wheel_down) self.grab = hit;
+    if (m.action == .release) self.grab = null;
+    const t = hit orelse return .{ .grid = self.grid, .row = m.row, .col = m.col };
+    return .{
+        .grid = t.grid,
+        .row = @intCast(std.math.clamp(@as(i64, m.row) - t.row, 0, std.math.maxInt(u16))),
+        .col = @intCast(std.math.clamp(@as(i64, m.col) - t.col, 0, std.math.maxInt(u16))),
+    };
+}
 
 /// Sends the input in `bytes` to Neovim and flushes. False if the user
 /// pressed Ctrl+Q to quit and `ctrl_q_quits` is set.
@@ -48,10 +82,14 @@ pub fn feed(self: *Forwarder, nvim: *Nvim, bytes: []const u8) !bool {
                 try msgpack.writeBool(nvim.writer(), focused);
             }
         },
-        .mouse => |m| if (MouseArgs.from(m)) |args| {
+        .mouse => |m| if (MouseArgs.from(m)) |found| {
             // keys typed before the click go first
             try sendKeys(nvim, &keys);
-            try args.send(nvim, self.grid);
+            var args = found;
+            const to = self.route(m);
+            args.row = to.row;
+            args.col = to.col;
+            try args.send(nvim, to.grid);
         },
         .unknown => {},
     };
@@ -145,4 +183,34 @@ test "mouse events become nvim_input_mouse args" {
     const move = MouseArgs.from(.{ .button = .none, .action = .motion, .row = 1, .col = 1 }).?;
     try t.expectEqualStrings("move", move.button);
     try t.expectEqual(@as(?MouseArgs, null), MouseArgs.from(.{ .button = .none, .action = .release, .row = 0, .col = 0 }));
+}
+
+test "mouse events on a float go to its grid" {
+    const t = std.testing;
+    var f: Forwarder = .{ .grid = 2 };
+    f.setTargets(&.{
+        .{ .grid = 3, .row = 1, .col = 1, .width = 10, .height = 5 },
+        // above the first
+        .{ .grid = 4, .row = 2, .col = 2, .width = 3, .height = 1 },
+    });
+    const off = f.route(.{ .button = .left, .action = .press, .row = 0, .col = 0 });
+    try t.expectEqual(@as(u32, 2), off.grid);
+    try t.expectEqual(@as(u16, 0), off.row);
+    _ = f.route(.{ .button = .left, .action = .release, .row = 0, .col = 0 });
+
+    const top = f.route(.{ .button = .left, .action = .press, .row = 2, .col = 3 });
+    try t.expectEqual(@as(u32, 4), top.grid);
+    try t.expectEqual(@as(u16, 0), top.row);
+    try t.expectEqual(@as(u16, 1), top.col);
+    // dragged off it: still that grid, clamped
+    const drag = f.route(.{ .button = .left, .action = .drag, .row = 0, .col = 9 });
+    try t.expectEqual(@as(u32, 4), drag.grid);
+    try t.expectEqual(@as(u16, 0), drag.row);
+    try t.expectEqual(@as(u16, 7), drag.col);
+    _ = f.route(.{ .button = .left, .action = .release, .row = 0, .col = 9 });
+    try t.expectEqual(@as(?Target, null), f.grab);
+
+    const under = f.route(.{ .button = .wheel_down, .action = .press, .row = 4, .col = 1 });
+    try t.expectEqual(@as(u32, 3), under.grid);
+    try t.expectEqual(@as(u16, 3), under.row);
 }
