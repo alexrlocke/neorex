@@ -1,13 +1,11 @@
-//! Floats big enough to show in a Rex floating pane. A group is an editor
+//! Floats to show in a Rex floating pane. A group is an editor
 //! float with every float hanging from it, as a picker builds its box,
 //! input, list and preview; groups that touch, as Telescope's do, are one.
-//! It goes native when something in it takes focus and it's big enough.
+//! It goes native when something in it takes focus.
 
 const std = @import("std");
 const Grids = @import("Grids.zig");
 
-pub const min_cols = 20;
-pub const min_rows = 5;
 pub const max_groups = 4;
 const max_tops = 16;
 
@@ -110,7 +108,7 @@ pub fn find(grids: *const Grids, out: *[max_groups]Group) []Group {
     }
     var k: usize = 0;
     for (all[0..n]) |g| {
-        if (!g.focusable or g.width < min_cols or g.height < min_rows or k == out.len) continue;
+        if (!g.focusable or k == out.len) continue;
         out[k] = g;
         k += 1;
     }
@@ -140,7 +138,7 @@ fn addFloat(gs: *Grids, grid: u32, win: i64, w: u32, h: u32, f: Grids.Float) !vo
     try gs.wins.put(testing.allocator, grid, .{ .win = win, .kind = .float, .float = f });
 }
 
-test "a picker's floats are one group; small or unfocusable ones aren't" {
+test "a picker's floats are one group; unfocusable ones aren't" {
     var gs: Grids = .{};
     defer gs.deinit(testing.allocator);
     // a picker as snacks makes it: an unfocusable box, input and list on it
@@ -149,14 +147,15 @@ test "a picker's floats are one group; small or unfocusable ones aren't" {
     try addFloat(&gs, 5, 1005, 58, 16, .{ .anchor_grid = 3, .row = 3, .col = 1 });
     // a notification: unfocusable
     try addFloat(&gs, 6, 1006, 30, 6, .{ .focusable = false, .screen = .{ 0, 100 } });
-    // a small focusable input
+    // a small focusable input: its own group
     try addFloat(&gs, 7, 1007, 30, 1, .{ .screen = .{ 40, 0 } });
     // the popup menu
     try addFloat(&gs, 8, -1, 30, 10, .{ .screen = .{ 40, 40 } });
 
     var buf: [max_groups]Group = undefined;
     const groups = find(&gs, &buf);
-    try testing.expectEqual(1, groups.len);
+    try testing.expectEqual(2, groups.len);
+    try testing.expectEqualSlices(u32, &.{7}, groups[1].topGrids());
     const g = groups[0];
     try testing.expectEqualSlices(u32, &.{3}, g.topGrids());
     try testing.expectEqual(@as(i64, 1002), g.key);
