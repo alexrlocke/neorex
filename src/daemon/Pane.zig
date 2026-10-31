@@ -80,7 +80,7 @@ pub fn token(self: *const Pane, source_fd: PaneFd) usize {
 }
 
 /// The pane may be gone; look it up by id.
-pub fn fromToken(t: usize) struct { id: u32, source_fd: PaneFd } {
+pub fn decodeToken(t: usize) struct { id: u32, source_fd: PaneFd } {
     return .{
         .id = @intCast((t - token_base) / 2),
         .source_fd = @fromBackingInt(@intCast((t - token_base) % 2)),
@@ -180,7 +180,7 @@ test "tokens round-trip and never collide" {
         for (std.enums.values(PaneFd)) |fd| {
             const t = pane.token(fd);
             try testing.expect(t >= token_base);
-            const back = fromToken(t);
+            const back = decodeToken(t);
             try testing.expectEqual(id, back.id);
             try testing.expectEqual(fd, back.source_fd);
         }

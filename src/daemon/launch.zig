@@ -41,7 +41,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, nvim_args: []const []const u8) !v
 
     // one byte once it's listening; nothing if it failed
     var ready: [1]u8 = undefined;
-    const n = std.c.read(daemon.stdout.?.handle, &ready, 1);
+    const n = std.posix.read(daemon.stdout.?.handle, &ready) catch 0;
     daemon.stdout.?.close(io);
     daemon.stdout = null;
     if (n != 1) {

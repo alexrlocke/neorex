@@ -16,6 +16,10 @@ pub const Message = enum(u8) {
     /// the terminal's foreground process group, the daemon isn't.
     resized = 'w',
     _,
+
+    pub fn fromByte(byte: u8) Message {
+        return @fromBackingInt(byte);
+    }
 };
 
 pub fn run(io: std.Io, socket_path: []const u8, id: ?u32) !void {
@@ -39,11 +43,7 @@ pub fn run(io: std.Io, socket_path: []const u8, id: ?u32) !void {
             .{ .fd = stream.socket.handle, .events = std.c.POLL.IN, .revents = 0 },
             .{ .fd = signals.read_fd, .events = std.c.POLL.IN, .revents = 0 },
         };
-        const ready = std.c.poll(&fds, fds.len, -1);
-        if (ready < 0) {
-            if (std.c.errno(ready) == .INTR) continue;
-            return error.PollFailed;
-        }
+        _ = try std.posix.poll(&fds, -1);
         if (fds[1].revents != 0 and (try signals.drain()).contains(.WINCH)) {
             try w.interface.writeByte(@intFromEnum(Message.resized));
             try w.interface.flush();
@@ -51,7 +51,7 @@ pub fn run(io: std.Io, socket_path: []const u8, id: ?u32) !void {
         if (fds[0].revents != 0) {
             var in: [64]u8 = undefined;
             // nothing is sent this way yet; hang-up is the only message
-            if ((try fdpass.recv(stream, io, &in)).len == 0) return;
+            if ((std.posix.read(stream.socket.handle, &in) catch 0) == 0) return;
         }
     }
 }
@@ -61,6 +61,30 @@ pub fn helloBytes(buf: []u8, id: ?u32) ![]const u8 {
     if (id) |n| return std.fmt.bufPrint(buf, "{c}{d}", .{ @intFromEnum(Message.hello), n });
     buf[0] = @intFromEnum(Message.hello);
     return buf[0..1];
+}
+
+/// A helper's connection and the terminal it handed over.
+pub const Hello = struct {
+    stream: net.Stream,
+    tty: std.posix.fd_t,
+    /// Null for the launcher's pane.
+    id: ?u32,
+
+    pub fn close(self: Hello, io: std.Io) void {
+        _ = std.c.close(self.tty);
+        self.stream.close(io);
+    }
+};
+
+/// The daemon's side: takes the next helper and its hello. Closes both on failure.
+pub fn acceptHello(server: *net.Server, io: std.Io) !Hello {
+    const stream = try server.accept(io);
+    errdefer stream.close(io);
+    var buf: [16]u8 = undefined;
+    const r = try fdpass.recv(stream, io, &buf);
+    const tty = r.fd orelse return error.NoTerminal;
+    errdefer _ = std.c.close(tty);
+    return .{ .stream = stream, .tty = tty, .id = try parseHello(buf[0..r.len]) };
 }
 
 /// The ID in a hello: null for the launcher's pane.
