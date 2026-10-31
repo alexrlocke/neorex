@@ -20,6 +20,8 @@ closing: ?Close = null,
 layer: ?Layer = null,
 /// Where Rex put the pane in its window, as fractions: x, y, w, h.
 rect: ?[4]f64 = null,
+/// A new split's terminal starts at Rex's default size: keep the guessed window size until the app's first resize.
+awaiting_layout: bool = false,
 last_asked_win_size: struct { grid: u32 = 0, cols: u32 = 0, rows: u32 = 0 } = .{},
 
 /// Never 0: Neovim's API reads 0 as the current window.

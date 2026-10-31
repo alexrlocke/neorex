@@ -159,6 +159,11 @@ api.nvim_create_autocmd('WinNew', {
     local dir, first = placement(win)
     if not dir then return end
     local from = vim.fn.win_getid(vim.fn.winnr('#'))
+    -- Neovim doesn't keep the scroll when splitting an external window
+    if shown(from) and api.nvim_win_get_buf(from) == api.nvim_win_get_buf(win) then
+      local view = api.nvim_win_call(from, vim.fn.winsaveview)
+      vim.fn.winrestview(view)
+    end
     vim.rpcnotify(chan, 'neorex_split', win, dir == 'row', first, shown(from) and from or 0)
   end,
 })

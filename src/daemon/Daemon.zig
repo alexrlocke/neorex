@@ -86,11 +86,18 @@ pub const token_nvim = 1;
 pub const token_listener = 2;
 pub const token_rex = 3;
 pub const token_focus_timer = 4;
+pub const token_layout_timer = 5;
 
 /// How long losing focus waits before Neovim hears of it: focus moving
 /// from one pane to another, such as into a floating pane, arrives as an
 /// out then an in, and shouldn't fire FocusLost and FocusGained.
 const focus_out_delay_ms = 80;
+
+/// How long a new split waits for the app to size it before trusting its terminal's size.
+const layout_wait_ms = 1000;
+
+/// A new Rex terminal's size, cols x rows, until the app lays it out.
+const rex_default_size = [2]u32{ 80, 24 };
 
 /// The id `Pane.startup` gives the pane neorex was run in.
 const startup_pane_id = 0;
@@ -158,6 +165,7 @@ pub fn handle(self: *Daemon, e: Loop.Event) !void {
         },
         token_rex => try self.onRex(),
         token_focus_timer => try self.sendFocus(true),
+        token_layout_timer => try self.layoutWaitOver(),
         token_listener => {},
         else => {
             const t = Pane.fromToken(e.token);
@@ -219,10 +227,29 @@ pub fn accept(self: *Daemon, server: *net.Server) !void {
         return err;
     };
     try pane.registerWith(self.loop);
+    if (pane.awaiting_layout) {
+        const v = pane.terminal_surface.?.view;
+        if (v.cols != rex_default_size[0] or v.rows != rex_default_size[1]) {
+            pane.awaiting_layout = false;
+        } else try self.loop.addTimer(token_layout_timer, layout_wait_ms, token_layout_timer);
+    }
     try self.sizeWindow(pane);
     if (pane.layer) |*l| if (try self.followLayer(pane)) |req| {
         l.fit = .{ .asked = req };
     };
+    try self.nvim.flush();
+    try self.draw();
+}
+
+/// The app never resized a new split: its terminal's size is the real one.
+fn layoutWaitOver(self: *Daemon) !void {
+    var any = false;
+    for (self.panes.items) |*p| if (p.awaiting_layout and p.terminal_surface != null) {
+        p.awaiting_layout = false;
+        any = true;
+        try self.sizeWindow(p);
+    };
+    if (!any) return;
     try self.nvim.flush();
     try self.draw();
 }
@@ -547,11 +574,19 @@ fn waitingPane(self: *const Daemon) ?*Pane {
 
 /// A guess until the new pane says its size: half the pane it splits.
 fn newWindowSize(self: *const Daemon, win: i64) [2]u32 {
+    const size = self.newPaneSize(win);
+    return .{ size[0], @max(size[1] -| 1, 1) };
+}
+
+/// A guess at a new split's terminal size, cols x rows: half the pane it splits.
+fn newPaneSize(self: *const Daemon, win: i64) [2]u32 {
     const sp = self.splitOf(win);
-    const p = self.splitFrom(sp) orelse return .{ 80, 24 };
-    const s = windowSize(p);
-    if (sp.side_by_side) return .{ @max(s[0] / 2, 1), s[1] };
-    return .{ s[0], @max(s[1] / 2, 1) };
+    const p = self.splitFrom(sp) orelse return rex_default_size;
+    const s = p.terminal_surface orelse return rex_default_size;
+    const cols = @max(s.view.cols, 1);
+    const rows = @max(s.view.rows, 2);
+    if (sp.side_by_side) return .{ @max(cols / 2, 1), rows };
+    return .{ cols, @max(rows / 2, 2) };
 }
 
 /// Where Neovim put `win`; beside the current window if it didn't say.
@@ -568,6 +603,7 @@ fn splitFrom(self: *const Daemon, sp: windows.Split) ?*Pane {
 /// Asks Neovim for the window to fit the pane, unless it already was.
 fn sizeWindow(self: *Daemon, p: *Pane) !void {
     const s = p.terminal_surface orelse return;
+    if (p.awaiting_layout) return;
     const win = p.neovim_window_handle orelse return;
     const grid = self.grids.gridOf(win) orelse return;
     const size = s.windowSize();
@@ -642,9 +678,13 @@ fn newPane(self: *Daemon, win: i64) !void {
         for (self.panes.items) |q| if (q.layer == null) if (q.rex_block) |b| break :blk b;
         return; // no anchor yet: next flush
     };
+    // starts at the guess, not Rex's default
+    const size = self.newPaneSize(win);
     const pane_id = self.next_pane_id;
     self.next_pane_id += 1;
-    try self.panes.append(self.gpa, Pane.fromNeovimWindow(pane_id, win));
+    var pane = Pane.fromNeovimWindow(pane_id, win);
+    pane.awaiting_layout = true;
+    try self.panes.append(self.gpa, pane);
     _ = self.splits.swapRemove(win);
 
     var id_buf: [16]u8 = undefined;
@@ -657,7 +697,11 @@ fn newPane(self: *Daemon, win: i64) !void {
         .layout = .{ .block = .{
             .flavor = "com.superlogical.terminal.shell",
             .label = "neorex",
-            .options = .{ .shell = "none", .command = &[_][]const u8{ self.exe, "pane", self.sock, id } },
+            .options = .{
+                .shell = "none",
+                .command = &[_][]const u8{ self.exe, "pane", self.sock, id },
+                .size = .{ .columns = size[0], .rows = size[1] },
+            },
         } },
     });
 }
@@ -709,6 +753,7 @@ fn onHelper(self: *Daemon, p: *Pane) !void {
         if (@as(pane_helper.Message, @fromBackingInt(@intCast(b))) == .resized) break true;
     } else false;
     if (!resized) return;
+    p.awaiting_layout = false;
     const ws = s.terminal.size() catch return self.paneGone(p);
     s.view.resize(ws.col, ws.row);
     try self.sizeWindow(p);
