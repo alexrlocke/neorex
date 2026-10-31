@@ -75,6 +75,7 @@ test {
     _ = @import("screen/Grids.zig");
     _ = @import("screen/Style.zig");
     _ = @import("screen/PaneView.zig");
+    _ = @import("screen/FloatGroups.zig");
     _ = @import("screen/render.zig");
     _ = @import("daemon/Loop.zig");
     _ = @import("daemon/fdpass.zig");
