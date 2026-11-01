@@ -1,175 +1,297 @@
-//! Our side of the Rex session: requests in flight, which block Rex has
-//! focused, and the latest session view. Reports only what the daemon
-//! has to act on; the rest it handles itself.
-
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const Value = std.json.Value;
 const Client = @import("../rex/Client.zig");
 const Pane = @import("Pane.zig");
+const WebSocket = @import("../rex/WebSocket.zig");
 
 const RexSession = @This();
+
+const Request = union(enum) {
+    attach,
+    new_split: u32, // pane
+    focus_block,
+    view,
+    disown_block,
+};
+
+const Pending = struct { id: u64, req: Request };
 
 gpa: Allocator,
 client: *Client,
 session_id: []const u8,
-/// Rex requests waiting for an answer.
-pending: std.ArrayList(Request) = .empty,
-/// False once Rex hangs up: windows keep working, but no new panes or focus.
-open: bool = true,
-/// The block Rex has focused, as we last saw or asked; owned.
-focused_block: ?[]u8 = null,
-/// The newest session view we've read, and whether one is on its way.
-view_rev: i64 = -1,
-view_pending: bool = false,
-view_outdated: bool = false,
-/// Focus requests in flight; views older than the last one's answer are stale.
-focus_pending: u32 = 0,
-focus_rev: i64 = 0,
 
-const Request = struct {
-    id: u64,
-    kind: enum { split, focus, view, other },
-    pane: u32 = 0,
-};
+pending_requests: std.ArrayList(Pending) = .empty,
 
-/// What Rex said that the daemon has to act on. Slices are only good
-/// until the next call to `next`.
+conn: enum { attaching, attached, closed } = .attaching,
+
+view: struct {
+    rev: i64 = -1,
+    fetch: enum { idle, running, stale } = .idle,
+} = .{},
+
+focused_block: union(enum) {
+    unknown,
+    settled: Pane.RexBlock,
+    requesting: struct { block: Pane.RexBlock, in_flight: u32, applied_rev: i64 = 0 },
+} = .unknown,
+
 pub const Update = union(enum) {
     /// The split asked for `pane` exists, as `block`.
     split_made: struct { pane: u32, block: []const u8 },
     /// Rex refused the split asked for this pane.
-    split_failed: u32,
+    split_failed: struct { pane: u32 },
     /// The user focused this block in Rex.
     focus_moved: []const u8,
 };
 
-pub fn deinit(self: *RexSession) void {
-    self.pending.deinit(self.gpa);
-    if (self.focused_block) |b| self.gpa.free(b);
-}
-
-/// Attaches to our Rex session, so we hear its events and can split it.
 pub fn attach(self: *RexSession) !void {
-    try self.request(.other, 0, "session.attach", .{ .session_id = self.session_id });
+    try self.request(.attach, "session.attach", .{ .session_id = self.session_id });
 }
 
-pub fn focus(self: *RexSession, p: *Pane) !void {
-    const block: []const u8 = if (p.rex_block) |*b| b else return;
-    if (self.focused_block) |f| if (std.mem.eql(u8, f, block)) return;
-    try self.rememberFocused(block);
-    self.focus_pending += 1;
-    try self.request(.focus, 0, "session.focus_block", .{ .session_id = self.session_id, .block_id = block });
+pub fn deinit(self: *RexSession) void {
+    self.pending_requests.deinit(self.gpa);
 }
 
-pub fn rememberFocused(self: *RexSession, block: []const u8) !void {
-    const copy = try self.gpa.dupe(u8, block);
-    if (self.focused_block) |f| self.gpa.free(f);
-    self.focused_block = copy;
-}
-
-pub fn hasFocused(self: *const RexSession, p: *const Pane) bool {
-    const f = self.focused_block orelse return false;
-    const b = if (p.rex_block) |*b| b else return false;
-    return std.mem.eql(u8, f, b);
-}
-
-pub fn request(self: *RexSession, kind: @FieldType(Request, "kind"), pane: u32, method: []const u8, payload: anytype) !void {
-    if (!self.open) return;
-    const id = try self.client.request(self.gpa, method, payload);
-    try self.pending.append(self.gpa, .{ .id = id, .kind = kind, .pane = pane });
-}
-
-pub fn askView(self: *RexSession) !void {
-    self.view_pending = true;
-    self.view_outdated = false;
-    try self.request(.view, 0, "session.view", .{ .session_id = self.session_id });
-}
-
-/// The creator owns a block and sizes it; this lets the app size it instead.
-pub fn disown(self: *RexSession, block: []const u8) !void {
-    try self.request(.other, 0, "session.disown_block", .{ .session_id = self.session_id, .block_ids = &[_][]const u8{block} });
-}
-
-/// Reads what Rex sent; false once it hung up. Then call `next` until null.
 pub fn read(self: *RexSession) !bool {
     if (!try self.client.read(self.gpa)) {
         std.debug.print("neorex daemon: Rex hung up\n", .{});
-        self.open = false;
+        self.conn = .closed;
         return false;
     }
     return true;
 }
 
+/// Send a request to the Rex client, add it to list of pending requests
+pub fn request(
+    self: *RexSession,
+    req: Request,
+    method: []const u8,
+    payload: anytype,
+) !void {
+    if (self.conn == .closed) return;
+    const id = try self.client.request(self.gpa, method, payload);
+    try self.pending_requests.append(self.gpa, .{ .id = id, .req = req });
+}
+
+/// The creator owns a block and sizes it; this lets the app size it instead.
+pub fn disown(self: *RexSession, block: []const u8) !void {
+    try self.request(.disown_block, "session.disown_block", .{ .session_id = self.session_id, .block_ids = &[_][]const u8{block} });
+}
+
 pub fn next(self: *RexSession) !?Update {
-    while (try self.client.next(self.gpa)) |m| switch (m) {
+    while (try self.client.next(self.gpa)) |message| switch (message) {
         .response => |r| if (try self.onResponse(r)) |update| return update,
-        .event => |ev| if (std.mem.eql(u8, ev.name, "session_view_changed")) {
-            const rev = Client.int(Client.get(ev.payload, "revision")) orelse continue;
-            if (rev <= self.view_rev) continue;
-            if (self.view_pending) {
-                self.view_outdated = true;
-            } else {
-                try self.askView();
-            }
-        },
-        .closed => |c| {
-            std.debug.print("neorex daemon: Rex closed {?d} {s}\n", .{ c.code, c.reason });
-            self.open = false;
-        },
+        .event => |ev| try self.onEvent(ev),
+        .closed => |c| self.onClosed(c),
+    };
+    if (self.conn == .closed) return self.failPendingSplit();
+    return null;
+}
+
+pub fn onResponse(self: *RexSession, res: Client.Response) !?Update {
+    const req = self.takePendingRequest(res.id) orelse return null;
+    if (res.result == .err) logRequestError(req, res.result.err);
+    switch (req) {
+        .new_split => |pane| return onNewSplitResult(pane, res.result),
+        .view => return try self.onViewResult(res.result),
+        .focus_block => try self.onFocusBlockResult(res.result),
+        .attach => try self.onAttachResult(res.result),
+        .disown_block => {},
+    }
+    return null;
+}
+
+fn onEvent(self: *RexSession, event: Client.Event) !void {
+    if (!std.mem.eql(u8, event.name, "session_view_changed")) return;
+    const rev = Client.getInt(event.payload, "revision") orelse return;
+    if (rev > self.view.rev) try self.fetchView();
+}
+
+fn onClosed(self: *RexSession, c: WebSocket.Close) void {
+    std.debug.print("neorex daemon: Rex closed {?d} {s}\n", .{ c.code, c.reason });
+    self.conn = .closed;
+}
+
+/// Closed: no answers will come, so fail the splits still waiting.
+fn failPendingSplit(self: *RexSession) ?Update {
+    while (self.pending_requests.pop()) |p| switch (p.req) {
+        .new_split => |pane| return .{ .split_failed = .{ .pane = pane } },
+        else => {},
     };
     return null;
 }
 
-fn onResponse(self: *RexSession, r: Client.Response) !?Update {
-    const i = for (self.pending.items, 0..) |q, i| {
-        if (q.id == r.id) break i;
-    } else return null;
-    const req = self.pending.swapRemove(i);
-    var update: ?Update = null;
-    switch (req.kind) {
-        .focus => {
-            self.focus_pending -|= 1;
-            if (r.result == .ok) self.focus_rev = @max(self.focus_rev, Client.int(Client.get(r.result.ok, "revision")) orelse 0);
-        },
-        .view => {
-            self.view_pending = false;
-            if (r.result == .ok) update = try self.onView(r.result.ok);
-            if (self.view_outdated) try self.askView();
-        },
-        else => {},
+pub fn takePendingRequest(self: *RexSession, id: u64) ?Request {
+    for (self.pending_requests.items, 0..) |p, i| {
+        if (p.id == id) return self.pending_requests.swapRemove(i).req;
     }
-    const ok = switch (r.result) {
-        .ok => |v| v,
-        .err => |e| {
-            std.debug.print("neorex daemon: Rex request failed: {s}: {s}\n", .{ e.code, e.message });
-            return if (req.kind == .split) .{ .split_failed = req.pane } else null;
-        },
-    };
-    if (req.kind != .split) return update;
-    const ids = Client.get(ok, "block_ids") orelse return null;
-    if (ids != .array or ids.array.items.len == 0) return null;
-    const block = Client.str(ids.array.items[0]) orelse return null;
-    return .{ .split_made = .{ .pane = req.pane, .block = block } };
+    return null;
 }
 
-/// A session view: reports focus the user moved to another block.
-fn onView(self: *RexSession, v: Value) !?Update {
-    const rev = Client.int(Client.get(v, "revision")) orelse return null;
-    if (rev <= self.view_rev) return null;
-    self.view_rev = rev;
-    // from before our own focus change landed
-    if (self.focus_pending > 0 or rev < self.focus_rev) return null;
-    const active = Client.str(Client.get(v, "active_window_id")) orelse return null;
-    const wins = Client.get(v, "windows") orelse return null;
-    if (wins != .array) return null;
-    const block = for (wins.array.items) |w| {
-        if (std.mem.eql(u8, Client.str(Client.get(w, "window_id")) orelse "", active)) break Client.str(Client.get(w, "focused_block_id")) orelse return null;
-    } else return null;
-    // unchanged: any difference is Neovim's move, which focus_block follows
-    const known = self.focused_block;
-    if (known) |f| if (std.mem.eql(u8, f, block)) return null;
-    try self.rememberFocused(block);
-    if (known == null) return null;
-    return .{ .focus_moved = self.focused_block.? };
+pub fn onNewSplitResult(pane_id: u32, result: Client.Result) Update {
+    const ok = switch (result) {
+        .ok => |val| val,
+        .err => return .{ .split_failed = .{ .pane = pane_id } },
+    };
+    const block = newBlockId(ok) orelse {
+        logUnexpectedResponse(.{ .new_split = pane_id }, "block_ids");
+        return .{ .split_failed = .{ .pane = pane_id } };
+    };
+    return .{ .split_made = .{ .pane = pane_id, .block = block } };
+}
+
+fn newBlockId(ok: std.json.Value) ?[]const u8 {
+    const ids = Client.get(ok, "block_ids") orelse return null;
+    if (ids != .array or ids.array.items.len == 0) return null;
+    return Client.str(ids.array.items[0]);
+}
+
+fn onViewResult(self: *RexSession, result: Client.Result) !?Update {
+    const stale = self.view.fetch == .stale;
+    self.view.fetch = .idle;
+    const update = switch (result) {
+        .ok => |val| self.applyView(val),
+        .err => null,
+    };
+    if (stale) try self.fetchView();
+    return update;
+}
+
+/// Fetches the session view, or another after the one on its way.
+fn fetchView(self: *RexSession) !void {
+    switch (self.view.fetch) {
+        .idle => {
+            if (self.conn == .closed) return;
+            try self.request(.view, "session.view", .{ .session_id = self.session_id });
+            self.view.fetch = .running;
+        },
+        // the answer will be out of date: fetch again when it arrives
+        .running => self.view.fetch = .stale,
+        .stale => {},
+    }
+}
+
+fn applyView(self: *RexSession, snapshot: std.json.Value) ?Update {
+    const rev = Client.getInt(snapshot, "revision") orelse return null;
+    if (rev <= self.view.rev) return null;
+    self.view.rev = rev;
+    const block = findFocusedBlock(snapshot) orelse {
+        logUnexpectedResponse(.view, "focused block");
+        return null;
+    };
+    return self.applyFocus(block, rev);
+}
+
+fn findFocusedBlock(snapshot: std.json.Value) ?Pane.RexBlock {
+    const active_id = Client.getStr(snapshot, "active_window_id") orelse return null;
+    const windows = Client.get(snapshot, "windows") orelse return null;
+    if (windows != .array) return null;
+    for (windows.array.items) |win| {
+        const win_id = Client.getStr(win, "window_id") orelse continue;
+        if (std.mem.eql(u8, win_id, active_id)) {
+            const block = Client.getStr(win, "focused_block_id") orelse return null;
+            return Pane.rexBlock(block) catch null;
+        }
+    }
+    return null;
+}
+
+fn applyFocus(self: *RexSession, block: Pane.RexBlock, rev: i64) ?Update {
+    switch (self.focused_block) {
+        .requesting => |pending_focus| {
+            if (pending_focus.in_flight > 0 or rev < pending_focus.applied_rev) return null;
+            if (std.mem.eql(u8, &pending_focus.block, &block)) {
+                self.focused_block = .{ .settled = block };
+                return null;
+            }
+        },
+        .settled => |last_focused_block| {
+            if (std.mem.eql(u8, &last_focused_block, &block)) return null;
+        },
+        .unknown => {},
+    }
+
+    const report = self.focused_block != .unknown;
+    self.focused_block = .{ .settled = block };
+    return if (report) .{ .focus_moved = &self.focused_block.settled } else null;
+}
+
+fn onFocusBlockResult(self: *RexSession, result: Client.Result) !void {
+    if (self.focused_block != .requesting) return;
+    const pending_focus = &self.focused_block.requesting;
+    pending_focus.in_flight -= 1;
+    switch (result) {
+        .ok => |val| {
+            const rev = Client.getInt(val, "revision") orelse 0;
+            if (rev > pending_focus.applied_rev) pending_focus.applied_rev = rev;
+        },
+        // refused => need to ask for view
+        .err => if (pending_focus.in_flight == 0) try self.fetchView(),
+    }
+}
+
+fn onAttachResult(self: *RexSession, result: Client.Result) !void {
+    switch (result) {
+        .ok => {
+            self.conn = .attached;
+            try self.fetchView();
+        },
+        .err => self.conn = .closed,
+    }
+}
+
+/// Asks Rex to focus the pane's block, unless it already has or will.
+pub fn focus(self: *RexSession, pane: *const Pane) !void {
+    if (self.conn == .closed) return;
+    const block = pane.rex_block orelse return;
+    if (self.isFocusedOrAsked(block)) return;
+    try self.request(.focus_block, "session.focus_block", .{
+        .session_id = self.session_id,
+        .block_id = @as([]const u8, &block),
+    });
+    switch (self.focused_block) {
+        .requesting => |*pending_focus| {
+            pending_focus.block = block;
+            pending_focus.in_flight += 1;
+        },
+        else => self.focused_block = .{ .requesting = .{ .block = block, .in_flight = 1 } },
+    }
+}
+
+/// Rex has focused the pane's block, or will once our request lands.
+pub fn hasFocused(self: *const RexSession, pane: *const Pane) bool {
+    return self.isFocusedOrAsked(pane.rex_block orelse return false);
+}
+
+/// Rex has focused `block`, or will once our request lands.
+fn isFocusedOrAsked(self: *const RexSession, block: Pane.RexBlock) bool {
+    const focused_block = self.currentFocus() orelse return false;
+    return Pane.sameBlock(focused_block, block);
+}
+
+/// The block Rex has focused, as we last saw or asked.
+fn currentFocus(self: *const RexSession) ?Pane.RexBlock {
+    return switch (self.focused_block) {
+        .unknown => null,
+        .settled => |last_focused| last_focused,
+        .requesting => |pending_focus| pending_focus.block,
+    };
+}
+
+// Loggers
+
+pub fn logRequestError(req: Request, e: Client.Error) void {
+    switch (req) {
+        .new_split => |pane| std.debug.print(
+            "neorex daemon: Rex new_split for pane {d} failed: {s}: {s}\n",
+            .{ pane, e.code, e.message },
+        ),
+        else => std.debug.print(
+            "neorex daemon: Rex {s} failed: {s}: {s}\n",
+            .{ @tagName(req), e.code, e.message },
+        ),
+    }
+}
+fn logUnexpectedResponse(req: Request, what: []const u8) void {
+    std.debug.print("neorex daemon: Rex {s} answer has no {s}\n", .{ @tagName(req), what });
 }

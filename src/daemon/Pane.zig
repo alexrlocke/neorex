@@ -102,6 +102,10 @@ pub fn registerWith(self: *Pane, loop: *Loop) !void {
     try loop.addRead(surface.terminal.fd, self.token(.terminal));
 }
 
+pub fn sameBlock(a: RexBlock, b: RexBlock) bool {
+    return std.mem.eql(u8, &a, &b);
+}
+
 const testing = std.testing;
 const test_id = "block:01a17fb6-c5b4-7d9c-8e1e-9fd2a65e8a50";
 const test_block: RexBlock = test_id[0..42].*;

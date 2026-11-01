@@ -60,7 +60,7 @@ pub fn next(self: *WebSocket) !?Message {
         if (rest.len < 2) return null;
         const fin = rest[0] & 0x80 != 0;
         if (rest[0] & 0x70 != 0) return error.ReservedBits;
-        const opcode: Opcode = @enumFromInt(@as(u4, @truncate(rest[0])));
+        const opcode: Opcode = @fromBackingInt(@intCast(@as(u4, @truncate(rest[0]))));
         // servers never mask
         if (rest[1] & 0x80 != 0) return error.MaskedFrame;
 
@@ -76,7 +76,7 @@ pub fn next(self: *WebSocket) !?Message {
             127 => std.mem.readInt(u64, rest[2..10], .big),
             else => len7,
         };
-        const is_control = @intFromEnum(opcode) >= 8;
+        const is_control = @backingInt(opcode) >= 8;
         if (is_control and (!fin or len > 125)) return error.BadControlFrame;
         const so_far: usize = if (self.joined) |j| j.len else 0;
         if (len > self.max_message - so_far) return error.MessageTooLarge;
@@ -209,7 +209,7 @@ pub fn writeFrame(w: *Writer, io: std.Io, opcode: Opcode, payload: []const u8) !
 
 /// Writes one final frame masked with `mask`.
 pub fn writeFrameMasked(w: *Writer, opcode: Opcode, payload: []const u8, mask: [4]u8) !void {
-    try w.writeByte(0x80 | @as(u8, @intFromEnum(opcode)));
+    try w.writeByte(0x80 | @as(u8, @backingInt(opcode)));
     if (payload.len < 126) {
         try w.writeByte(0x80 | @as(u8, @intCast(payload.len)));
     } else if (payload.len <= std.math.maxInt(u16)) {
@@ -245,7 +245,7 @@ const testing = std.testing;
 fn serverFrame(gpa: std.mem.Allocator, fin: bool, opcode: Opcode, payload: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
-    try out.append(gpa, (if (fin) @as(u8, 0x80) else 0) | @intFromEnum(opcode));
+    try out.append(gpa, (if (fin) @as(u8, 0x80) else 0) | @backingInt(opcode));
     if (payload.len < 126) {
         try out.append(gpa, @intCast(payload.len));
     } else if (payload.len <= std.math.maxInt(u16)) {

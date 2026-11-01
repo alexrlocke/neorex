@@ -209,6 +209,7 @@ fn typedIntoUnfocusedPane(self: *const Daemon, pane: *const Pane, bytes: []const
 }
 
 fn newPane(self: *Daemon, win: i64) !void {
+    if (self.rex.conn == .closed) return; // no Rex: the window stays in Neovim
     const sp = self.changes.splitOf(win);
     // beside the window it came from, else any pane Rex knows
     // a copy: appending below can move every pane
@@ -222,7 +223,7 @@ fn newPane(self: *Daemon, win: i64) !void {
 
     var id_buf: [16]u8 = undefined;
     const id = try std.fmt.bufPrint(&id_buf, "{d}", .{pane_id});
-    try self.rex.request(.split, pane_id, "session.new_split", .{
+    try self.rex.request(.{ .new_split = pane_id }, "session.new_split", .{
         .session_id = self.rex.session_id,
         .anchor_id = @as([]const u8, &anchor),
         .direction = if (sp.side_by_side) "horizontal" else "vertical",
@@ -377,7 +378,7 @@ fn onRex(self: *Daemon) !void {
     if (!try self.rex.read()) return self.loop.remove(self.rex.client.fd());
     while (try self.rex.next()) |update| switch (update) {
         .split_made => |made| try self.onSplitMade(made.pane, made.block),
-        .split_failed => |id| if (self.panes.byId(id)) |p| {
+        .split_failed => |failed| if (self.panes.byId(failed.pane)) |p| {
             p.closing = .request_failed;
         },
         .focus_moved => |block| try self.onRexFocus(block),

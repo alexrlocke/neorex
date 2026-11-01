@@ -35,10 +35,12 @@ pub const Message = union(enum) {
     closed: WebSocket.Close,
 };
 
+pub const Result = union(enum) { ok: Value, err: Error };
+
 pub const Response = struct {
     id: u64,
     seq: i64,
-    result: union(enum) { ok: Value, err: Error },
+    result: Result,
 };
 
 pub const Error = struct {
@@ -216,38 +218,38 @@ pub fn socketPath(url: []const u8, buf: []u8) ![]const u8 {
 }
 
 pub fn parseWelcome(root: Value) !Welcome {
-    if (!eql(str(get(root, "type")), "welcome")) return error.NotWelcome;
-    if (!eql(str(get(root, "protocol")), protocol)) return error.BadProtocol;
-    const max = int(get(get(root, "limits"), "max_message_bytes")) orelse return error.NotWelcome;
+    if (!eql(getStr(root, "type"), "welcome")) return error.NotWelcome;
+    if (!eql(getStr(root, "protocol"), protocol)) return error.BadProtocol;
+    const max = getInt(get(root, "limits"), "max_message_bytes") orelse return error.NotWelcome;
     if (max < 65536) return error.NotWelcome;
-    return .{ .max_message_bytes = @intCast(max), .api_revision = int(get(root, "api_revision")) orelse 0 };
+    return .{ .max_message_bytes = @intCast(max), .api_revision = getInt(root, "api_revision") orelse 0 };
 }
 
 /// A response or event, or null for a type we don't know.
 pub fn parseMessage(root: Value) !?Message {
-    const kind = str(get(root, "type")) orelse return error.BadMessage;
+    const kind = getStr(root, "type") orelse return error.BadMessage;
     if (eql(kind, "response")) {
-        const id_str = str(get(root, "id")) orelse return error.BadMessage;
+        const id_str = getStr(root, "id") orelse return error.BadMessage;
         // not one of ours
         const id = std.fmt.parseInt(u64, id_str, 10) catch return null;
-        const seq = int(get(root, "seq")) orelse 0;
+        const seq = getInt(root, "seq") orelse 0;
         if (get(root, "error")) |e| if (e == .object) return .{ .response = .{ .id = id, .seq = seq, .result = .{ .err = .{
-            .code = str(get(e, "code")) orelse "",
-            .message = str(get(e, "message")) orelse "",
-            .status = int(get(e, "status")) orelse 0,
+            .code = getStr(e, "code") orelse "",
+            .message = getStr(e, "message") orelse "",
+            .status = getInt(e, "status") orelse 0,
         } } } };
         return .{ .response = .{ .id = id, .seq = seq, .result = .{ .ok = get(root, "payload") orelse .null } } };
     }
     if (eql(kind, "event")) {
-        const seq = int(get(root, "seq")) orelse 0;
+        const seq = getInt(root, "seq") orelse 0;
         var event = get(root, "payload") orelse return error.BadMessage;
-        var name = str(get(event, "type")) orelse return error.BadMessage;
+        var name = getStr(event, "type") orelse return error.BadMessage;
         var session_id: ?[]const u8 = null;
         if (eql(name, "session_event")) {
             const inner = get(event, "payload");
-            session_id = str(get(inner, "session_id"));
+            session_id = getStr(inner, "session_id");
             event = get(inner, "event") orelse return error.BadMessage;
-            name = str(get(event, "type")) orelse return error.BadMessage;
+            name = getStr(event, "type") orelse return error.BadMessage;
         }
         return .{ .event = .{ .seq = seq, .session_id = session_id, .name = name, .payload = get(event, "payload") orelse .null } };
     }
@@ -269,6 +271,16 @@ pub fn str(v: ?Value) ?[]const u8 {
 pub fn int(v: ?Value) ?i64 {
     const n = v orelse return null;
     return if (n == .integer) n.integer else null;
+}
+
+/// The integer field `name` of an object, or null.
+pub fn getInt(v: ?Value, name: []const u8) ?i64 {
+    return int(get(v, name));
+}
+
+/// The string field `name` of an object, or null.
+pub fn getStr(v: ?Value, name: []const u8) ?[]const u8 {
+    return str(get(v, name));
 }
 
 fn eql(a: ?[]const u8, b: []const u8) bool {
@@ -319,7 +331,7 @@ test "responses: payload and error" {
     const r = (try parseMessage(ok.value)).?.response;
     try testing.expectEqual(@as(u64, 3), r.id);
     try testing.expectEqual(@as(i64, 5), r.seq);
-    try testing.expectEqualStrings("1.0", str(get(r.result.ok, "rex_version")).?);
+    try testing.expectEqualStrings("1.0", getStr(r.result.ok, "rex_version").?);
 
     const err = try parseSample(gpa,
         \\{"type":"response","id":"2","seq":0,"error":{"code":"not_found","message":"block not found","status":404}}
@@ -356,7 +368,7 @@ test "events: plain, session-wrapped, and unknown types" {
     const b = (try parseMessage(wrapped.value)).?.event;
     try testing.expectEqualStrings("block_created", b.name);
     try testing.expectEqualStrings("session:s", b.session_id.?);
-    try testing.expectEqualStrings("block:b", str(get(b.payload, "block_id")).?);
+    try testing.expectEqualStrings("block:b", getStr(b.payload, "block_id").?);
 
     const bare = try parseSample(gpa,
         \\{"type":"event","seq":3,"payload":{"type":"keymap_changed"}}
@@ -399,7 +411,7 @@ test "live: server.version and an unknown method" {
 
     const id = try c.request(gpa, "server.version", null);
     const r = try waitFor(&c, gpa, id);
-    try testing.expect(str(get(r.result.ok, "rex_version")).?.len > 0);
+    try testing.expect(getStr(r.result.ok, "rex_version").?.len > 0);
 
     const bad = try c.request(gpa, "neorex.no_such_method", .{ .x = 1 });
     const e = (try waitFor(&c, gpa, bad)).result.err;
