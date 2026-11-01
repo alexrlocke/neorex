@@ -45,7 +45,7 @@ pub fn run(io: std.Io, socket_path: []const u8, id: ?u32) !void {
         };
         _ = try std.posix.poll(&fds, -1);
         if (fds[1].revents != 0 and (try signals.drain()).contains(.WINCH)) {
-            try w.interface.writeByte(@intFromEnum(Message.resized));
+            try w.interface.writeByte(@backingInt(Message.resized));
             try w.interface.flush();
         }
         if (fds[0].revents != 0) {
@@ -58,8 +58,8 @@ pub fn run(io: std.Io, socket_path: []const u8, id: ?u32) !void {
 
 /// The hello message: `p`, then the ID if there is one.
 pub fn helloBytes(buf: []u8, id: ?u32) ![]const u8 {
-    if (id) |n| return std.fmt.bufPrint(buf, "{c}{d}", .{ @intFromEnum(Message.hello), n });
-    buf[0] = @intFromEnum(Message.hello);
+    if (id) |n| return std.fmt.bufPrint(buf, "{c}{d}", .{ @backingInt(Message.hello), n });
+    buf[0] = @backingInt(Message.hello);
     return buf[0..1];
 }
 
@@ -89,7 +89,7 @@ pub fn acceptHello(server: *net.Server, io: std.Io) !Hello {
 
 /// The ID in a hello: null for the launcher's pane.
 pub fn parseHello(bytes: []const u8) !?u32 {
-    if (bytes.len == 0 or bytes[0] != @intFromEnum(Message.hello)) return error.BadHello;
+    if (bytes.len == 0 or bytes[0] != @backingInt(Message.hello)) return error.BadHello;
     if (bytes.len == 1) return null;
     return std.fmt.parseInt(u32, bytes[1..], 10) catch error.BadHello;
 }
