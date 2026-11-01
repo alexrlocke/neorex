@@ -426,6 +426,8 @@ fn reconcile(self: *Daemon) !void {
             continue;
         }
         p.closing = .window_closed;
+        // hanging up closes the Rex pane only once its helper has connected
+        if (p.terminal_surface == null) if (p.rex_block) |*b| try self.closeInRex(null, b);
         self.removePane(i);
     }
     if (self.panes.items.len == 0) {
@@ -483,7 +485,8 @@ fn reconcileLayers(self: *Daemon) !void {
         const g = for (groups) |*g| {
             if (g.key == l.group.key) break g;
         } else {
-            if (l.id) |*id| try self.rexRequest(.other, 0, "session.close_layer", .{ .session_id = self.session_id, .layer_id = @as([]const u8, id) });
+            // without an id Rex hasn't answered yet: the answer closes it
+            if (l.id) |*id| try self.closeInRex(id, null);
             if (p.closing == null) p.closing = .window_closed;
             self.removePane(i);
             continue;
@@ -821,6 +824,14 @@ fn onRex(self: *Daemon) !void {
     };
 }
 
+/// Closes a pane we made in Rex: its floating layer if it has one, else its
+/// block. Its helper, if it ever connects, finds no pane and leaves.
+fn closeInRex(self: *Daemon, layer: ?[]const u8, block: ?[]const u8) !void {
+    if (layer) |id| return self.rexRequest(.other, 0, "session.close_layer", .{ .session_id = self.session_id, .layer_id = id });
+    const id = block orelse return;
+    try self.rexRequest(.other, 0, "block.close", .{ .session_id = self.session_id, .block_id = id });
+}
+
 fn askView(self: *Daemon) !void {
     self.view_req = true;
     self.view_again = false;
@@ -856,10 +867,11 @@ fn onRexResponse(self: *Daemon, r: Client.Response) !void {
         },
     };
     if (req.kind != .split and req.kind != .layer) return;
-    const p = self.paneById(req.pane) orelse return;
     const ids = Client.get(ok, "block_ids") orelse return;
     if (ids != .array or ids.array.items.len == 0) return;
     const block = Client.str(ids.array.items[0]) orelse return;
+    // its window or floats closed while Rex made it: nothing will draw there
+    const p = self.paneById(req.pane) orelse return self.closeInRex(Client.str(Client.get(ok, "layer_id")), block);
     p.rex_block = Pane.rexBlock(block) catch blk: {
         std.debug.print("neorex daemon: not a block id: {s}\n", .{block});
         break :blk null;
