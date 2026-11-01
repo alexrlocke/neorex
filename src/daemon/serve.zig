@@ -11,7 +11,6 @@ const Loop = @import("Loop.zig");
 const Daemon = @import("Daemon.zig");
 const Pane = @import("Pane.zig");
 const Surface = @import("Surface.zig");
-const fdpass = @import("fdpass.zig");
 const pane = @import("pane_helper.zig");
 
 /// Longest path a Unix socket takes on macOS, less one for the terminator.
@@ -91,18 +90,17 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, base: []const u8, nvim_args: []co
 
     var loop: Loop = try .init();
     defer loop.deinit();
-    for ([_]std.c.SIG{ .TERM, .INT, .HUP }) |sig| try loop.addSignal(sig, Daemon.token_signal);
-    try loop.addRead(nvim.readFd(), Daemon.token_nvim);
-    try loop.addRead(server.socket.handle, Daemon.token_listener);
-    try loop.addRead(rex.fd(), Daemon.token_rex);
+    for ([_]std.c.SIG{ .TERM, .INT, .HUP }) |sig| try loop.addSignal(sig, @backingInt(Daemon.Token.signal));
+    try loop.addRead(nvim.readFd(), @backingInt(Daemon.Token.nvim_socket));
+    try loop.addRead(server.socket.handle, @backingInt(Daemon.Token.helper_listener));
+    try loop.addRead(rex.fd(), @backingInt(Daemon.Token.rex_socket));
 
     var d: Daemon = .{
         .gpa = gpa,
         .io = io,
         .loop = &loop,
-        .nvim = &nvim,
-        .rex = &rex,
-        .session_id = session_id,
+        .nvim = .{ .client = &nvim },
+        .rex = .{ .gpa = gpa, .client = &rex, .session_id = session_id },
         .exe = exe,
         .sock = sock,
     };
@@ -111,19 +109,8 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, base: []const u8, nvim_args: []co
     launch_owned = false;
     try d.start(launch);
 
-    var events: [16]Loop.Event = undefined;
-    while (d.end == null) {
-        var pending_accept = false;
-        for (try loop.wait(&events)) |e| {
-            if (e.token == Daemon.token_listener) pending_accept = true;
-            try d.handle(e);
-            if (d.end != null) break;
-        }
-        // between batches, so no stale event reaches a new pane
-        if (pending_accept and d.end == null) d.accept(&server) catch |err| std.debug.print("neorex daemon: a pane failed: {t}\n", .{err});
-        if (d.end == null) try d.afterBatch();
-    }
-    std.debug.print("neorex daemon: {t}\n", .{d.end.?});
+    const stop_reason = try d.run(&server);
+    std.debug.print("neorex daemon: {t}\n", .{stop_reason});
     // a clean end needs no log
     std.Io.Dir.cwd().deleteFile(io, log) catch {};
 }
@@ -135,15 +122,10 @@ fn env(name: [*:0]const u8) ?[]const u8 {
 /// Waits up to 5 s for the launcher's helper and takes its terminal.
 fn takePane(gpa: std.mem.Allocator, io: std.Io, server: *net.Server) !*Surface {
     var fds = [_]std.c.pollfd{.{ .fd = server.socket.handle, .events = std.c.POLL.IN, .revents = 0 }};
-    if (std.c.poll(&fds, 1, 5000) <= 0) return error.NoPane;
-    const stream = try server.accept(io);
-    errdefer stream.close(io);
-    var hello: [16]u8 = undefined;
-    const r = try fdpass.recv(stream, io, &hello);
-    const tty = r.fd orelse return error.NoTerminal;
-    errdefer _ = std.c.close(tty);
-    if (try pane.parseHello(hello[0..r.len]) != null) return error.BadHello;
-    return Surface.create(gpa, stream, tty);
+    if ((std.posix.poll(&fds, 5000) catch 0) == 0) return error.NoPane;
+    const hello = try pane.acceptHello(server, io);
+    errdefer hello.close(io);
+    return Surface.create(gpa, hello.stream, hello.tty);
 }
 
 test "base path fits a socket" {

@@ -81,6 +81,9 @@ test {
     _ = @import("daemon/fdpass.zig");
     _ = @import("daemon/pane_helper.zig");
     _ = @import("daemon/Pane.zig");
+    _ = @import("daemon/Panes.zig");
+    _ = @import("daemon/NvimSession.zig");
+    _ = @import("daemon/WindowChanges.zig");
     _ = @import("daemon/Surface.zig");
     _ = @import("daemon/Daemon.zig");
     _ = @import("term/modes.zig");
@@ -88,6 +91,8 @@ test {
     _ = serve;
     _ = @import("rex/WebSocket.zig");
     _ = @import("rex/Client.zig");
+    _ = @import("rex/Session.zig");
+    _ = @import("rex/ids.zig");
     _ = @import("debug/PaneHost.zig");
     _ = debug_keys;
     _ = debug_events;

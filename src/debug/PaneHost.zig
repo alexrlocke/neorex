@@ -46,7 +46,7 @@ pub fn owns(self: *const PaneHost, token: usize) bool {
 /// Handles an event for one of this host's tokens.
 pub fn handle(self: *PaneHost, io: std.Io, token: usize) !void {
     const i = (token - self.base) / 2;
-    const source: Source = @enumFromInt((token - self.base) % 2);
+    const source: Source = @fromBackingInt(@intCast((token - self.base) % 2));
     const slot = &self.panes[i];
     // null if closed earlier in this batch
     const p = &(slot.* orelse return);
@@ -71,7 +71,7 @@ pub fn accept(self: *PaneHost, io: std.Io, loop: *const Loop, server: *net.Serve
     const hello = try fdpass.recv(stream, io, &buf);
     const tty = hello.fd orelse return error.NoTerminal;
     errdefer _ = std.c.close(tty);
-    if (hello.len != 1 or buf[0] != @intFromEnum(pane.Message.hello)) return error.BadHello;
+    if (hello.len != 1 or buf[0] != @backingInt(pane.Message.hello)) return error.BadHello;
 
     const i = for (self.panes, 0..) |p, i| {
         if (p == null) break i;
@@ -80,8 +80,8 @@ pub fn accept(self: *PaneHost, io: std.Io, loop: *const Loop, server: *net.Serve
     self.next_id += 1;
 
     const p = &self.panes[i].?;
-    try loop.addRead(stream.socket.handle, self.base + 2 * i + @intFromEnum(Source.socket));
-    try loop.addRead(tty, self.base + 2 * i + @intFromEnum(Source.tty));
+    try loop.addRead(stream.socket.handle, self.base + 2 * i + @backingInt(Source.socket));
+    try loop.addRead(tty, self.base + 2 * i + @backingInt(Source.tty));
     std.debug.print("pane {d}: attached\n", .{p.id});
     try p.term.writer.print("\x1b[H\x1b[2Jneorex pane {d}, driven by {s}.\r\n", .{ p.id, self.name });
     try printSize(p);
@@ -95,7 +95,7 @@ fn onMessage(io: std.Io, p: *Pane) !bool {
     const r = try fdpass.recv(p.stream, io, &buf);
     if (r.fd) |fd| _ = std.c.close(fd);
     if (r.len == 0) return false;
-    for (buf[0..r.len]) |b| switch (@as(pane.Message, @enumFromInt(b))) {
+    for (buf[0..r.len]) |b| switch (@as(pane.Message, @fromBackingInt(@intCast(b)))) {
         .resized => try printSize(p),
         else => {},
     };

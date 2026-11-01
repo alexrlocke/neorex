@@ -10,7 +10,6 @@ const Forwarder = @import("../nvim/Forwarder.zig");
 const Grids = @import("../screen/Grids.zig");
 const render = @import("../screen/render.zig");
 
-
 /// Runs `nvim --embed` plus `nvim_args`.
 pub fn run(gpa: std.mem.Allocator, io: std.Io, nvim_args: []const []const u8) !void {
     var out_buf: [64 * 1024]u8 = undefined;

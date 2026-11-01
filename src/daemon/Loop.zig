@@ -52,7 +52,7 @@ pub fn remove(self: *const Loop, fd: fd_t) !void {
 
 /// Watches `sig`, and ignores it so its default action never runs.
 pub fn addSignal(self: *Loop, sig: std.c.SIG, token: usize) !void {
-    const n = @intFromEnum(sig);
+    const n = @backingInt(sig);
     // only the first time, so a second call can't save our own SIG_IGN
     if (self.old[n] == null) {
         var old: std.c.Sigaction = undefined;

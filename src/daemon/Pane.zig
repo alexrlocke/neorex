@@ -2,6 +2,7 @@
 //! order. A plain value: only the Surface needs a stable address.
 
 const std = @import("std");
+const ids = @import("../rex/ids.zig");
 const Surface = @import("Surface.zig");
 const Loop = @import("Loop.zig");
 const FloatGroups = @import("../screen/FloatGroups.zig");
@@ -27,11 +28,10 @@ last_asked_win_size: struct { grid: u32 = 0, cols: u32 = 0, rows: u32 = 0 } = .{
 /// Never 0: Neovim's API reads 0 as the current window.
 pub const NeovimWindowHandle = i64;
 
-/// `block:` and a UUID.
-pub const RexBlock = [42]u8;
-
-/// `layer:` and a UUID.
-pub const RexLayer = [42]u8;
+pub const RexBlock = ids.Block;
+pub const rexBlock = ids.block;
+pub const RexLayer = ids.Layer;
+pub const rexLayer = ids.layer;
 
 pub const Fit = union(enum) {
     none,
@@ -52,11 +52,6 @@ pub const Layer = struct {
     /// for, until the user moves it.
     bounds: [4]f64 = .{ 0, 0, 0, 0 },
 };
-
-pub fn rexBlock(id: []const u8) error{BadRexBlock}!RexBlock {
-    if (id.len != 42) return error.BadRexBlock;
-    return id[0..42].*;
-}
 
 pub const Close = enum {
     /// The terminal is already gone, so it isn't restored.
@@ -125,7 +120,7 @@ pub fn token(self: *const Pane, source_fd: PaneFd) usize {
 }
 
 /// The pane may be gone; look it up by id.
-pub fn fromToken(t: usize) struct { id: u32, source_fd: PaneFd } {
+pub fn decodeToken(t: usize) struct { id: u32, source_fd: PaneFd } {
     return .{
         .id = @intCast((t - token_base) / 2),
         .source_fd = @fromBackingInt(@intCast((t - token_base) % 2)),
@@ -225,7 +220,7 @@ test "tokens round-trip and never collide" {
         for (std.enums.values(PaneFd)) |fd| {
             const t = pane.token(fd);
             try testing.expect(t >= token_base);
-            const back = fromToken(t);
+            const back = decodeToken(t);
             try testing.expectEqual(id, back.id);
             try testing.expectEqual(fd, back.source_fd);
         }
