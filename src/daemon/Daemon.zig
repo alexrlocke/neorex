@@ -14,7 +14,7 @@ const Grids = @import("../screen/Grids.zig");
 const Loop = @import("Loop.zig");
 const Pane = @import("Pane.zig");
 const Panes = @import("Panes.zig");
-const RexSession = @import("RexSession.zig");
+const RexSession = @import("../rex/Session.zig");
 const NvimSession = @import("NvimSession.zig");
 const WindowChanges = @import("WindowChanges.zig");
 const Surface = @import("Surface.zig");
@@ -192,7 +192,7 @@ fn onInput(self: *Daemon, pane: *Pane) !void {
     const bytes = buf[0..n];
     if (self.typedIntoUnfocusedPane(pane, bytes)) {
         try self.makeCurrent(pane);
-        try self.rex.focus(pane);
+        try self.rex.focus(pane.rex_block);
     }
 
     surface.forwarder.grid = self.gridOfPane(pane) orelse 0;
@@ -204,7 +204,7 @@ fn onInput(self: *Daemon, pane: *Pane) !void {
 fn typedIntoUnfocusedPane(self: *const Daemon, pane: *const Pane, bytes: []const u8) bool {
     const win = pane.neovim_window_handle orelse return false;
     return win != self.nvim.current_win and
-        !self.rex.hasFocused(pane) and
+        !self.rex.hasFocused(pane.rex_block) and
         !input.onlyFocusReports(bytes);
 }
 
@@ -304,7 +304,7 @@ fn onCurrent(self: *Daemon, win: i64) !void {
     const p = self.panes.byWin(win) orelse return;
     try self.nvim.fitUiTo(p);
     try self.draw();
-    try self.rex.focus(p);
+    try self.rex.focus(p.rex_block);
 }
 
 /// Matches panes to windows: new external windows get panes, ordinary ones
@@ -393,7 +393,7 @@ fn onSplitMade(self: *Daemon, pane_id: u32, block: []const u8) !void {
         break :blk null;
     };
     try self.rex.disown(block);
-    if (p.neovim_window_handle == self.nvim.current_win) try self.rex.focus(p);
+    if (p.neovim_window_handle == self.nvim.current_win) try self.rex.focus(p.rex_block);
 }
 
 /// The user focused one of our panes in Rex: make its window current.

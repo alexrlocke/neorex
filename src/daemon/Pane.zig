@@ -2,6 +2,7 @@
 //! order. A plain value: only the Surface needs a stable address.
 
 const std = @import("std");
+const ids = @import("../rex/ids.zig");
 const Surface = @import("Surface.zig");
 const Loop = @import("Loop.zig");
 
@@ -20,13 +21,8 @@ last_asked_win_size: struct { grid: u32 = 0, cols: u32 = 0, rows: u32 = 0 } = .{
 /// Never 0: Neovim's API reads 0 as the current window.
 pub const NeovimWindowHandle = i64;
 
-/// `block:` and a UUID.
-pub const RexBlock = [42]u8;
-
-pub fn rexBlock(id: []const u8) error{BadRexBlock}!RexBlock {
-    if (id.len != 42) return error.BadRexBlock;
-    return id[0..42].*;
-}
+pub const RexBlock = ids.Block;
+pub const rexBlock = ids.block;
 
 pub const Close = enum {
     /// The terminal is already gone, so it isn't restored.
@@ -100,10 +96,6 @@ pub fn registerWith(self: *Pane, loop: *Loop) !void {
     const surface = self.terminal_surface.?;
     try loop.addRead(surface.helper_socket.socket.handle, self.token(.helper_socket));
     try loop.addRead(surface.terminal.fd, self.token(.terminal));
-}
-
-pub fn sameBlock(a: RexBlock, b: RexBlock) bool {
-    return std.mem.eql(u8, &a, &b);
 }
 
 const testing = std.testing;

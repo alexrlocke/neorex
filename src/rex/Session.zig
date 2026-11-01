@@ -3,11 +3,11 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const Client = @import("../rex/Client.zig");
-const Pane = @import("Pane.zig");
-const WebSocket = @import("../rex/WebSocket.zig");
+const Client = @import("Client.zig");
+const WebSocket = @import("WebSocket.zig");
+const ids = @import("ids.zig");
 
-const RexSession = @This();
+const Session = @This();
 
 /// What a request asked for; tags match Rex's methods.
 const Request = union(enum) {
@@ -39,8 +39,8 @@ view: struct {
 /// The block Rex has focused, and our change to it still landing.
 focused_block: union(enum) {
     unknown,
-    settled: Pane.RexBlock,
-    requesting: struct { block: Pane.RexBlock, in_flight: u32, applied_rev: i64 = 0 },
+    settled: ids.Block,
+    requesting: struct { block: ids.Block, in_flight: u32, applied_rev: i64 = 0 },
 } = .unknown,
 
 /// What the daemon has to act on. Slices are only good until the next
@@ -54,17 +54,17 @@ pub const Update = union(enum) {
     focus_moved: []const u8,
 };
 
-pub fn deinit(self: *RexSession) void {
+pub fn deinit(self: *Session) void {
     self.pending_requests.deinit(self.gpa);
 }
 
 /// Joins our Rex session, so we hear its events and can split it.
-pub fn attach(self: *RexSession) !void {
+pub fn attach(self: *Session) !void {
     try self.request(.attach, "session.attach", .{ .session_id = self.session_id });
 }
 
 /// One read from Rex; false once it hung up. Then call `next` until null.
-pub fn read(self: *RexSession) !bool {
+pub fn read(self: *Session) !bool {
     if (!try self.client.read(self.gpa)) {
         std.debug.print("neorex daemon: Rex hung up\n", .{});
         self.conn = .closed;
@@ -74,7 +74,7 @@ pub fn read(self: *RexSession) !bool {
 }
 
 /// The next update for the daemon, or null when there are none.
-pub fn next(self: *RexSession) !?Update {
+pub fn next(self: *Session) !?Update {
     while (try self.client.next(self.gpa)) |message| switch (message) {
         .response => |r| if (try self.onResponse(r)) |update| return update,
         .event => |ev| try self.onEvent(ev),
@@ -84,11 +84,11 @@ pub fn next(self: *RexSession) !?Update {
     return null;
 }
 
-/// Asks Rex to focus the pane's block, unless it already has or will.
-pub fn focus(self: *RexSession, pane: *const Pane) !void {
+/// Asks Rex to focus `maybe_block`, unless it already has or will.
+pub fn focus(self: *Session, maybe_block: ?ids.Block) !void {
     if (self.conn == .closed) return;
-    const block = pane.rex_block orelse return;
-    if (self.isFocusedOrAsked(block)) return;
+    const block = maybe_block orelse return;
+    if (self.hasFocused(block)) return;
     try self.request(.focus_block, "session.focus_block", .{
         .session_id = self.session_id,
         .block_id = @as([]const u8, &block),
@@ -102,19 +102,20 @@ pub fn focus(self: *RexSession, pane: *const Pane) !void {
     }
 }
 
-/// Rex has focused the pane's block, or will once our request lands.
-pub fn hasFocused(self: *const RexSession, pane: *const Pane) bool {
-    return self.isFocusedOrAsked(pane.rex_block orelse return false);
+/// Rex has focused `maybe_block`, or will once our request lands.
+pub fn hasFocused(self: *const Session, maybe_block: ?ids.Block) bool {
+    const focused_block = self.currentFocus() orelse return false;
+    return ids.sameBlock(focused_block, maybe_block orelse return false);
 }
 
 /// The creator owns a block and sizes it; this lets the app size it instead.
-pub fn disown(self: *RexSession, block: []const u8) !void {
+pub fn disown(self: *Session, block: []const u8) !void {
     try self.request(.disown_block, "session.disown_block", .{ .session_id = self.session_id, .block_ids = &[_][]const u8{block} });
 }
 
 /// Send a request to the Rex client, add it to list of pending requests
 pub fn request(
-    self: *RexSession,
+    self: *Session,
     req: Request,
     method: []const u8,
     payload: anytype,
@@ -125,7 +126,7 @@ pub fn request(
 }
 
 /// Hands an answer to its request's handler.
-pub fn onResponse(self: *RexSession, res: Client.Response) !?Update {
+pub fn onResponse(self: *Session, res: Client.Response) !?Update {
     const req = self.takePendingRequest(res.id) orelse return null;
     if (res.result == .err) logRequestError(req, res.result.err);
     switch (req) {
@@ -139,19 +140,19 @@ pub fn onResponse(self: *RexSession, res: Client.Response) !?Update {
 }
 
 /// Only a newer session view matters.
-fn onEvent(self: *RexSession, event: Client.Event) !void {
+fn onEvent(self: *Session, event: Client.Event) !void {
     if (!std.mem.eql(u8, event.name, "session_view_changed")) return;
     const rev = Client.getInt(event.payload, "revision") orelse return;
     if (rev > self.view.rev) try self.fetchView();
 }
 
-fn onClosed(self: *RexSession, c: WebSocket.Close) void {
+fn onClosed(self: *Session, c: WebSocket.Close) void {
     std.debug.print("neorex daemon: Rex closed {?d} {s}\n", .{ c.code, c.reason });
     self.conn = .closed;
 }
 
 /// Closed: no answers will come, so fail the splits still waiting.
-fn failPendingSplit(self: *RexSession) ?Update {
+fn failPendingSplit(self: *Session) ?Update {
     while (self.pending_requests.pop()) |p| switch (p.req) {
         .new_split => |pane| return .{ .split_failed = .{ .pane = pane } },
         else => {},
@@ -160,7 +161,7 @@ fn failPendingSplit(self: *RexSession) ?Update {
 }
 
 /// Removes and returns the request `id` answers.
-pub fn takePendingRequest(self: *RexSession, id: u64) ?Request {
+pub fn takePendingRequest(self: *Session, id: u64) ?Request {
     for (self.pending_requests.items, 0..) |p, i| {
         if (p.id == id) return self.pending_requests.swapRemove(i).req;
     }
@@ -168,7 +169,7 @@ pub fn takePendingRequest(self: *RexSession, id: u64) ?Request {
 }
 
 /// Attached: a view gives the starting focus.
-fn onAttachResult(self: *RexSession, result: Client.Result) !void {
+fn onAttachResult(self: *Session, result: Client.Result) !void {
     switch (result) {
         .ok => {
             self.conn = .attached;
@@ -193,13 +194,13 @@ pub fn onNewSplitResult(pane_id: u32, result: Client.Result) Update {
 
 /// The block a split made.
 fn newBlockId(ok: std.json.Value) ?[]const u8 {
-    const ids = Client.get(ok, "block_ids") orelse return null;
-    if (ids != .array or ids.array.items.len == 0) return null;
-    return Client.str(ids.array.items[0]);
+    const block_ids = Client.get(ok, "block_ids") orelse return null;
+    if (block_ids != .array or block_ids.array.items.len == 0) return null;
+    return Client.str(block_ids.array.items[0]);
 }
 
 /// Records the revision our focus change landed at.
-fn onFocusBlockResult(self: *RexSession, result: Client.Result) !void {
+fn onFocusBlockResult(self: *Session, result: Client.Result) !void {
     if (self.focused_block != .requesting) return;
     const pending_focus = &self.focused_block.requesting;
     pending_focus.in_flight -= 1;
@@ -214,7 +215,7 @@ fn onFocusBlockResult(self: *RexSession, result: Client.Result) !void {
 }
 
 /// Applies the view, then fetches again if it was already out of date.
-fn onViewResult(self: *RexSession, result: Client.Result) !?Update {
+fn onViewResult(self: *Session, result: Client.Result) !?Update {
     const stale = self.view.fetch == .stale;
     self.view.fetch = .idle;
     const update = switch (result) {
@@ -226,7 +227,7 @@ fn onViewResult(self: *RexSession, result: Client.Result) !?Update {
 }
 
 /// Fetches the session view, or another after the one on its way.
-fn fetchView(self: *RexSession) !void {
+fn fetchView(self: *Session) !void {
     switch (self.view.fetch) {
         .idle => {
             if (self.conn == .closed) return;
@@ -240,7 +241,7 @@ fn fetchView(self: *RexSession) !void {
 }
 
 /// Skips views no newer than the last one read.
-fn applyView(self: *RexSession, snapshot: std.json.Value) ?Update {
+fn applyView(self: *Session, snapshot: std.json.Value) ?Update {
     const rev = Client.getInt(snapshot, "revision") orelse return null;
     if (rev <= self.view.rev) return null;
     self.view.rev = rev;
@@ -252,7 +253,7 @@ fn applyView(self: *RexSession, snapshot: std.json.Value) ?Update {
 }
 
 /// The focused block of the active window.
-fn findFocusedBlock(snapshot: std.json.Value) ?Pane.RexBlock {
+fn findFocusedBlock(snapshot: std.json.Value) ?ids.Block {
     const active_id = Client.getStr(snapshot, "active_window_id") orelse return null;
     const windows = Client.get(snapshot, "windows") orelse return null;
     if (windows != .array) return null;
@@ -260,14 +261,14 @@ fn findFocusedBlock(snapshot: std.json.Value) ?Pane.RexBlock {
         const win_id = Client.getStr(win, "window_id") orelse continue;
         if (std.mem.eql(u8, win_id, active_id)) {
             const block = Client.getStr(win, "focused_block_id") orelse return null;
-            return Pane.rexBlock(block) catch null;
+            return ids.block(block) catch null;
         }
     }
     return null;
 }
 
 /// Reports focus the user moved; echoes of our own change are ignored.
-fn applyFocus(self: *RexSession, block: Pane.RexBlock, rev: i64) ?Update {
+fn applyFocus(self: *Session, block: ids.Block, rev: i64) ?Update {
     switch (self.focused_block) {
         .requesting => |pending_focus| {
             if (pending_focus.in_flight > 0 or rev < pending_focus.applied_rev) return null;
@@ -288,18 +289,12 @@ fn applyFocus(self: *RexSession, block: Pane.RexBlock, rev: i64) ?Update {
 }
 
 /// The block Rex has focused, as we last saw or asked.
-fn currentFocus(self: *const RexSession) ?Pane.RexBlock {
+fn currentFocus(self: *const Session) ?ids.Block {
     return switch (self.focused_block) {
         .unknown => null,
         .settled => |last_focused| last_focused,
         .requesting => |pending_focus| pending_focus.block,
     };
-}
-
-/// Rex has focused `block`, or will once our request lands.
-fn isFocusedOrAsked(self: *const RexSession, block: Pane.RexBlock) bool {
-    const focused_block = self.currentFocus() orelse return false;
-    return Pane.sameBlock(focused_block, block);
 }
 
 // Loggers
