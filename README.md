@@ -5,8 +5,12 @@ A Rex-Native Neovim frontend built in Zig.
 One Neovim runs in the background behind all your panes, so buffers,
 registers, undo and language servers are shared. `:split` and `:vsplit` open
 real Rex panes where Neovim would put the window, and closing a pane in Rex
-closes its window. Floats, the completion menu and statuslines are drawn
-inside the pane they belong to.
+closes its window. Focusable floats, such as pickers, open in Rex floating
+panes, along with any floats attached to them. The completion menu,
+unfocusable floats like notifications, and statuslines are drawn inside the
+pane they belong to.
+
+![neorex demo](assets/demo.gif)
 
 ## Status
 
@@ -52,7 +56,8 @@ keys, Neovim's redraw events, the renderer, and pane hand-off.
 - Only one tab page: Neovim tab pages aren't Rex tabs.
 - No external command line or messages: long messages still show
   "Press ENTER".
-- Mouse clicks on a float go to the window under it.
+- No global statusline: with `laststatus=3`, each pane still shows its own
+  statusline.
 
 ## Plans
 
@@ -64,8 +69,6 @@ their own packages:
 - terminal key input (the kitty keyboard protocol)
 
 neorex should then be easier to extend to other editors that provide similar processes for running external windows.
-
-As rex matures, and there is increased support for things like floating windows, notifications etc we can then start to move more and more things over to rex to display natively.
 
 ## License
 
