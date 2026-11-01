@@ -3,14 +3,15 @@
 //! message grid over the bottom rows. Remembers what it drew so each frame
 //! sends only what changed.
 //!
-//! Floats are drawn into their window's pane. Once Rex's floating panes
-//! mature, they could be Rex floating panes instead.
+//! Floats are drawn into their window's pane, except groups shown in Rex
+//! floating panes, which `frameFloats` draws on their own.
 
 const std = @import("std");
 const Writer = std.Io.Writer;
 const Grid = @import("Grid.zig");
 const Grids = @import("Grids.zig");
 const render = @import("render.zig");
+const Style = @import("Style.zig");
 
 const PaneView = @This();
 
@@ -29,13 +30,26 @@ drawn_cursor: ?render.Cursor = null,
 drawn_floats: [Grids.max_floats]Rect = undefined,
 drawn_floats_len: u8 = 0,
 
+/// How a pane draws the screen's floats and messages.
+pub const Opts = struct {
+    /// Draws the messages and the screen's floats.
+    focused: bool = false,
+    /// The pane's top left on grid 1, which spans the Rex window: screen
+    /// floats move by it, then into the pane.
+    origin: [2]i32 = .{ 0, 0 },
+    /// Editor floats shown elsewhere, with every float hanging from them.
+    skip: []const u32 = &.{},
+};
+
 /// A float as drawn, in terminal cells.
-const Rect = struct {
+pub const Rect = struct {
     grid: u32,
     row: i32,
     col: i32,
     width: u32,
     height: u32,
+    on_screen: bool = false,
+    on_msg: bool = false,
 
     fn rows(r: Rect, limit: u32) struct { u32, u32 } {
         const top: u32 = @intCast(std.math.clamp(r.row, 0, @as(i64, limit)));
@@ -46,6 +60,8 @@ const Rect = struct {
 
 /// Widest row floats are drawn into.
 const max_cols = 1024;
+/// Tallest terminal a floating pane draws into.
+const max_rows = 512;
 
 pub fn init(cols: u32, rows: u32) PaneView {
     return .{ .cols = cols, .rows = rows };
@@ -63,8 +79,10 @@ pub fn resize(self: *PaneView, cols: u32, rows: u32) void {
 /// and, if `focused`, the messages. Clears the grid's dirty rows but not
 /// the message grid's, which the caller clears once every pane is drawn.
 /// True if it wrote anything.
-pub fn frame(self: *PaneView, grids: *Grids, grid_id: ?u32, focused: bool, w: *Writer) Writer.Error!bool {
+pub fn frame(self: *PaneView, grids: *Grids, grid_id: ?u32, opts: Opts, w: *Writer) Writer.Error!bool {
+    const focused = opts.focused;
     const style = &grids.style;
+    style.clearBlends();
     const id = grid_id orelse 0;
     const g: ?*Grid = if (grid_id) |i| grids.get(i) else null;
     const size: [2]u32 = if (g) |gr| .{ gr.width, gr.height } else .{ 0, 0 };
@@ -79,7 +97,7 @@ pub fn frame(self: *PaneView, grids: *Grids, grid_id: ?u32, focused: bool, w: *W
 
     var placed_buf: [Grids.max_floats]Grids.Placed = undefined;
     var rects_buf: [Grids.max_floats]Rect = undefined;
-    const rects = if (g != null) floatRects(grids, grids.floatsOver(id, focused, &placed_buf), &rects_buf) else rects_buf[0..0];
+    const rects = if (g != null) self.fitScreen(floatRects(grids, grids.floatsOver(id, focused, opts.skip, &placed_buf), &rects_buf), opts.origin, screenRows(grids)) else rects_buf[0..0];
     const floats_moved = !sameRects(rects, self.drawn_floats[0..self.drawn_floats_len]);
     var floats_changed = floats_moved;
     for (rects) |r| {
@@ -156,6 +174,105 @@ pub fn frame(self: *PaneView, grids: *Grids, grid_id: ?u32, focused: bool, w: *W
     return true;
 }
 
+fn screenRows(grids: *const Grids) u32 {
+    return if (grids.get(1)) |g| g.height else 0;
+}
+
+/// Screen floats moved from grid 1 into the pane at `origin`, and kept
+/// inside it where they fit. Message floats keep to the bottom, as the
+/// messages do.
+fn fitScreen(self: *const PaneView, rects: []Rect, origin: [2]i32, screen_rows: u32) []Rect {
+    for (rects) |*r| if (r.on_screen) {
+        const up: i32 = if (r.on_msg) @as(i32, @intCast(screen_rows)) - @as(i32, @intCast(self.rows)) else origin[0];
+        r.row = fitInto(r.row - up, r.height, self.rows);
+        if (!r.on_msg) r.col -= origin[1];
+        r.col = fitInto(r.col, r.width, self.cols);
+    };
+    return rects;
+}
+
+/// `pos` moved back inside `0..limit` if `len` fits there.
+fn fitInto(pos: i32, len: u32, limit: u32) i32 {
+    if (len > limit) return @max(@min(pos, 0), @as(i32, @intCast(limit)) - @as(i32, @intCast(len)));
+    return std.math.clamp(pos, 0, @as(i32, @intCast(limit - len)));
+}
+
+/// The floats drawn last frame, lowest first.
+pub fn drawnFloats(self: *const PaneView) []const Rect {
+    return self.drawn_floats[0..self.drawn_floats_len];
+}
+
+/// Draws just floats `placed`, moved up and left by `origin`, over a blank
+/// terminal: a group shown in a Rex floating pane. True if it wrote anything.
+pub fn frameFloats(self: *PaneView, grids: *Grids, placed: []const Grids.Placed, origin: [2]i32, w: *Writer) Writer.Error!bool {
+    const style = &grids.style;
+    style.clearBlends();
+    var rects_buf: [Grids.max_floats]Rect = undefined;
+    const rects = floatRects(grids, placed, &rects_buf);
+    for (rects) |*r| {
+        r.row -= origin[0];
+        r.col -= origin[1];
+    }
+    if (!sameRects(rects, self.drawnFloats())) self.full = true;
+
+    var dirty: std.StaticBitSet(max_rows) = .empty;
+    const rows = @min(self.rows, max_rows);
+    for (rects) |r| {
+        const f = grids.get(r.grid).?;
+        const top, const bot = r.rows(rows);
+        if (f.scrolls_len > 0) {
+            for (top..bot) |i| dirty.set(i);
+            continue;
+        }
+        var it = f.dirty.iterator(.{});
+        while (it.next()) |fr| {
+            const tr = @as(i64, r.row) + @as(i64, @intCast(fr));
+            if (tr >= 0 and tr < rows) dirty.set(@intCast(tr));
+        }
+    }
+    const cur = floatCursor(grids, rects, rows, self.cols);
+    if (!self.full and dirty.count() == 0 and std.meta.eql(cur, self.drawn_cursor)) return false;
+
+    try render.begin(w);
+    var current: ?u32 = null;
+    if (self.full) {
+        try render.setHl(style, 0, w, &current);
+        try w.writeAll("\x1b[2J");
+        dirty = .empty;
+        for (rects) |r| {
+            const top, const bot = r.rows(rows);
+            for (top..bot) |i| dirty.set(i);
+        }
+    }
+    var it = dirty.iterator(.{});
+    while (it.next()) |r| {
+        var line: [max_cols]Grid.Cell = undefined;
+        const shown = compose(grids, &.{}, rects, @intCast(r), @min(self.cols, max_cols), &line);
+        try render.drawRow(shown, style, @intCast(r), self.cols, w, &current);
+    }
+    try render.end(style, cur, w);
+
+    self.full = false;
+    self.drawn_grid = 0;
+    self.drawn_size = .{ 0, 0 };
+    self.drawn_cursor = cur;
+    @memcpy(self.drawn_floats[0..rects.len], rects);
+    self.drawn_floats_len = @intCast(rects.len);
+    return true;
+}
+
+/// The cursor, if it's on one of the floats and inside the terminal.
+fn floatCursor(grids: *const Grids, rects: []const Rect, rows: u32, cols: u32) ?render.Cursor {
+    for (rects) |r| if (grids.cursor_grid == r.grid) {
+        const f = grids.get(r.grid).?;
+        const row = @as(i64, r.row) + f.cursor_row;
+        const col = @as(i64, r.col) + f.cursor_col;
+        if (row < 0 or row >= rows or col < 0 or col >= cols) return null;
+        return .{ .row = @intCast(row), .col = @intCast(col) };
+    };
+    return null;
+}
+
 /// Repeats the grid's scrolls if they stay clear of the messages and
 /// floats; else redraws the rows they moved.
 fn scrolls(self: *const PaneView, g: *Grid, grid_rows: u32, rects: []const Rect, w: *Writer) Writer.Error!void {
@@ -195,7 +312,7 @@ fn floatRects(grids: *const Grids, placed: []const Grids.Placed, out: *[Grids.ma
     for (placed) |p| {
         const f = grids.get(p.grid) orelse continue;
         if (f.width == 0 or f.height == 0) continue;
-        out[n] = .{ .grid = p.grid, .row = p.row, .col = p.col, .width = f.width, .height = f.height };
+        out[n] = .{ .grid = p.grid, .row = p.row, .col = p.col, .width = f.width, .height = f.height, .on_screen = p.on_screen, .on_msg = p.on_msg };
         n += 1;
     }
     return out[0..n];
@@ -203,7 +320,7 @@ fn floatRects(grids: *const Grids, placed: []const Grids.Placed, out: *[Grids.ma
 
 /// Base row `row` at terminal row `r` with the floats over it, in `line`.
 /// Just `row` if no float covers it.
-fn compose(grids: *const Grids, row: []const Grid.Cell, rects: []const Rect, r: u32, cols: u32, line: *[max_cols]Grid.Cell) []const Grid.Cell {
+fn compose(grids: *Grids, row: []const Grid.Cell, rects: []const Rect, r: u32, cols: u32, line: *[max_cols]Grid.Cell) []const Grid.Cell {
     var width: usize = row.len;
     var covered = false;
     for (rects) |f| {
@@ -226,10 +343,26 @@ fn compose(grids: *const Grids, row: []const Grid.Cell, rects: []const Rect, r: 
         // a wide char cut by the float's edges leaves a blank
         if (left > 0 and line[left].len == 0) line[left - 1] = .{ .hl = line[left - 1].hl };
         if (left + n < width and line[left + n].len == 0) line[left + n] = .{ .hl = line[left + n].hl };
-        @memcpy(line[left..][0..n], src[skip..][0..n]);
+        for (src[skip..][0..n], left..) |cell, i| line[i] = blendCell(&grids.style, cell, line[0..width], i);
         if (line[left].len == 0) line[left] = .{ .hl = line[left].hl };
     }
     return line[0..width];
+}
+
+/// Float cell `cell` over `line[i]`. A blended blank lets the text under
+/// it show, unless that's half a wide char.
+fn blendCell(style: *Style, cell: Grid.Cell, line: []const Grid.Cell, i: usize) Grid.Cell {
+    if (style.attr(cell.hl).blend == 0) return cell;
+    const under = line[i];
+    const wide = under.len == 0 or (i + 1 < line.len and line[i + 1].len == 0);
+    if (cell.len == 1 and cell.text[0] == ' ' and !wide) {
+        var c = under;
+        c.hl = style.blendOver(cell.hl, under.hl, true);
+        return c;
+    }
+    var c = cell;
+    c.hl = style.blendOver(cell.hl, under.hl, false);
+    return c;
 }
 
 /// Where the cursor shows in this pane, if it does.
@@ -250,4 +383,55 @@ fn cursorAt(self: *const PaneView, grids: *const Grids, g: ?*Grid, id: u32, grid
     const first = msg_total - msg_n;
     if (m.cursor_row < first or m.cursor_row >= msg_total or m.cursor_col >= self.cols) return null;
     return .{ .row = self.rows - msg_n + (m.cursor_row - first), .col = m.cursor_col };
+}
+
+const testing = std.testing;
+
+test "screen floats move into the pane and stay inside it" {
+    const view: PaneView = .init(20, 10);
+    var rects = [_]Rect{
+        // over the pane at 0, 30 of a wider screen
+        .{ .grid = 3, .row = 2, .col = 35, .width = 4, .height = 2, .on_screen = true },
+        // past its right edge: moved back in
+        .{ .grid = 4, .row = 0, .col = 70, .width = 8, .height = 1, .on_screen = true },
+        // over a window: left alone
+        .{ .grid = 5, .row = 1, .col = 1, .width = 2, .height = 1 },
+        // on the messages: kept to the bottom
+        .{ .grid = 6, .row = 25, .col = 2, .width = 5, .height = 3, .on_screen = true, .on_msg = true },
+    };
+    _ = view.fitScreen(&rects, .{ 0, 30 }, 30);
+    try testing.expectEqual(@as(i32, 2), rects[0].row);
+    try testing.expectEqual(@as(i32, 5), rects[0].col);
+    try testing.expectEqual(@as(i32, 12), rects[1].col);
+    try testing.expectEqual(@as(i32, 1), rects[2].col);
+    try testing.expectEqual(@as(i32, 5), rects[3].row);
+    try testing.expectEqual(@as(i32, 2), rects[3].col);
+}
+
+test "frameFloats draws a group on its own and the cursor in it" {
+    var gs: Grids = .{};
+    defer gs.deinit(testing.allocator);
+    try gs.grids.put(testing.allocator, 3, .{});
+    try gs.grids.getPtr(3).?.resize(testing.allocator, 6, 2);
+    try gs.grids.put(testing.allocator, 4, .{});
+    try gs.grids.getPtr(4).?.resize(testing.allocator, 3, 1);
+    gs.grids.getPtr(3).?.cells[0] = .init("a", 0);
+    gs.grids.getPtr(4).?.cells[0] = .init("b", 0);
+    gs.cursor_grid = 4;
+    gs.grids.getPtr(4).?.cursor_col = 1;
+    const placed = [_]Grids.Placed{
+        .{ .grid = 3, .row = 10, .col = 20, .zindex = 50, .compindex = 0 },
+        .{ .grid = 4, .row = 11, .col = 21, .zindex = 51, .compindex = 1 },
+    };
+    var view: PaneView = .init(8, 4);
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try testing.expect(try view.frameFloats(&gs, &placed, .{ 10, 20 }, &out.writer));
+    try testing.expect(std.mem.indexOf(u8, out.written(), "a") != null);
+    try testing.expectEqual(render.Cursor{ .row = 1, .col = 2 }, view.drawn_cursor.?);
+    try testing.expectEqual(@as(usize, 2), view.drawnFloats().len);
+    // nothing changed: nothing drawn
+    gs.grids.getPtr(3).?.dirty.unsetAll();
+    gs.grids.getPtr(4).?.dirty.unsetAll();
+    try testing.expect(!try view.frameFloats(&gs, &placed, .{ 10, 20 }, &out.writer));
 }

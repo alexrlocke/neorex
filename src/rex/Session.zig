@@ -13,9 +13,12 @@ const Session = @This();
 const Request = union(enum) {
     attach,
     new_split: u32, // pane
+    new_layer: u32, // pane
     focus_block,
     view,
     disown_block,
+    close_block,
+    close_layer,
 };
 
 /// Sent, not answered yet.
@@ -43,15 +46,29 @@ focused_block: union(enum) {
     requesting: struct { block: ids.Block, in_flight: u32, applied_rev: i64 = 0 },
 } = .unknown,
 
+/// The Rex window our panes are in, as the daemon last found in a view.
+window: ?[43]u8 = null,
+
+/// A focus change from the same view as a `layout` update, sent after it.
+queued_focus: ?[]const u8 = null,
+
 /// What the daemon has to act on. Slices are only good until the next
 /// call to `next`.
 pub const Update = union(enum) {
     /// The split asked for `pane` exists, as `block`.
     split_made: struct { pane: u32, block: []const u8 },
     /// Rex refused the split asked for this pane.
-    split_failed: struct { pane: u32 },
+    split_failed: Failed,
+    /// The floating layer asked for `pane` exists, as `layer` holding `block`.
+    layer_made: struct { pane: u32, block: []const u8, layer: ?[]const u8 },
+    /// Rex refused the floating layer asked for this pane.
+    layer_failed: Failed,
+    /// A newer view's windows, to read where our panes sit.
+    layout: []const std.json.Value,
     /// The user focused this block in Rex.
     focus_moved: []const u8,
+
+    pub const Failed = struct { pane: u32 };
 };
 
 pub fn deinit(self: *Session) void {
@@ -75,6 +92,10 @@ pub fn read(self: *Session) !bool {
 
 /// The next update for the daemon, or null when there are none.
 pub fn next(self: *Session) !?Update {
+    if (self.queued_focus) |block| {
+        self.queued_focus = null;
+        return .{ .focus_moved = block };
+    }
     while (try self.client.next(self.gpa)) |message| switch (message) {
         .response => |r| if (try self.onResponse(r)) |update| return update,
         .event => |ev| try self.onEvent(ev),
@@ -113,6 +134,25 @@ pub fn disown(self: *Session, block: []const u8) !void {
     try self.request(.disown_block, "session.disown_block", .{ .session_id = self.session_id, .block_ids = &[_][]const u8{block} });
 }
 
+/// Closes a block we made. Its helper, if it ever connects, finds no pane and leaves.
+pub fn closeBlock(self: *Session, block: []const u8) !void {
+    try self.request(.close_block, "block.close", .{ .session_id = self.session_id, .block_id = block });
+}
+
+/// Closes a floating layer we made.
+pub fn closeLayer(self: *Session, layer: []const u8) !void {
+    try self.request(.close_layer, "session.close_layer", .{ .session_id = self.session_id, .layer_id = layer });
+}
+
+/// Asks for a floating layer at `bounds` in our window, holding `layout`.
+pub fn newLayer(self: *Session, pane_id: u32, bounds: [4]f64, layout: anytype) !void {
+    if (self.window) |*w| {
+        try self.request(.{ .new_layer = pane_id }, "session.new_layer", .{ .session_id = self.session_id, .window_id = @as([]const u8, w), .bounds = bounds, .layout = layout });
+    } else {
+        try self.request(.{ .new_layer = pane_id }, "session.new_layer", .{ .session_id = self.session_id, .bounds = bounds, .layout = layout });
+    }
+}
+
 /// Send a request to the Rex client, add it to list of pending requests
 pub fn request(
     self: *Session,
@@ -131,10 +171,11 @@ pub fn onResponse(self: *Session, res: Client.Response) !?Update {
     if (res.result == .err) logRequestError(req, res.result.err);
     switch (req) {
         .new_split => |pane| return onNewSplitResult(pane, res.result),
+        .new_layer => |pane| return onNewLayerResult(pane, res.result),
         .view => return try self.onViewResult(res.result),
         .focus_block => try self.onFocusBlockResult(res.result),
         .attach => try self.onAttachResult(res.result),
-        .disown_block => {},
+        .disown_block, .close_block, .close_layer => {},
     }
     return null;
 }
@@ -155,6 +196,7 @@ fn onClosed(self: *Session, c: WebSocket.Close) void {
 fn failPendingSplit(self: *Session) ?Update {
     while (self.pending_requests.pop()) |p| switch (p.req) {
         .new_split => |pane| return .{ .split_failed = .{ .pane = pane } },
+        .new_layer => |pane| return .{ .layer_failed = .{ .pane = pane } },
         else => {},
     };
     return null;
@@ -190,6 +232,19 @@ pub fn onNewSplitResult(pane_id: u32, result: Client.Result) Update {
         return .{ .split_failed = .{ .pane = pane_id } };
     };
     return .{ .split_made = .{ .pane = pane_id, .block = block } };
+}
+
+/// Always an update: the pane is waiting either way.
+fn onNewLayerResult(pane_id: u32, result: Client.Result) Update {
+    const ok = switch (result) {
+        .ok => |val| val,
+        .err => return .{ .layer_failed = .{ .pane = pane_id } },
+    };
+    const block = newBlockId(ok) orelse {
+        logUnexpectedResponse(.{ .new_layer = pane_id }, "block_ids");
+        return .{ .layer_failed = .{ .pane = pane_id } };
+    };
+    return .{ .layer_made = .{ .pane = pane_id, .block = block, .layer = Client.getStr(ok, "layer_id") } };
 }
 
 /// The block a split made.
@@ -240,16 +295,20 @@ fn fetchView(self: *Session) !void {
     }
 }
 
-/// Skips views no newer than the last one read.
+/// Skips views no newer than the last one read. Layout comes first, then
+/// any focus change.
 fn applyView(self: *Session, snapshot: std.json.Value) ?Update {
     const rev = Client.getInt(snapshot, "revision") orelse return null;
     if (rev <= self.view.rev) return null;
     self.view.rev = rev;
-    const block = findFocusedBlock(snapshot) orelse {
+    const focus_update = if (findFocusedBlock(snapshot)) |block| self.applyFocus(block, rev) else blk: {
         logUnexpectedResponse(.view, "focused block");
-        return null;
+        break :blk null;
     };
-    return self.applyFocus(block, rev);
+    const windows = Client.get(snapshot, "windows") orelse return focus_update;
+    if (windows != .array) return focus_update;
+    if (focus_update) |u| self.queued_focus = u.focus_moved;
+    return .{ .layout = windows.array.items };
 }
 
 /// The focused block of the active window.

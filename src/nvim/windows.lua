@@ -102,6 +102,41 @@ function M.close(win)
   if api.nvim_win_is_valid(win) then pcall(api.nvim_win_close, win, true) end
 end
 
+--- Fits the floats hanging from editor floats `tops` to `w` x `h` at `row`,
+--- `col` on the screen, as their Rex floating pane was resized to. `cur` is
+--- where they are now: row, col, width, height. Returns whether it moved
+--- anything.
+function M.place_group(tops, row, col, w, h, cur)
+  local set = {}
+  for _, t in ipairs(tops) do set[t] = true end
+  -- a snacks picker lays itself out again from its root box's size
+  local ok, Snacks = pcall(require, 'snacks')
+  if ok and type(Snacks) == 'table' and Snacks.picker then
+    for _, p in ipairs(Snacks.picker.get() or {}) do
+      local l = p.layout
+      if l and l.root and set[l.root.win] then
+        local o = l.opts.layout
+        o.width, o.height, o.row, o.col = w, h, row, col
+        l:update()
+        return true
+      end
+    end
+  end
+  -- one float on its own grows by what its pane grew
+  if #tops ~= 1 or not api.nvim_win_is_valid(tops[1]) then return false end
+  local win = tops[1]
+  local c = api.nvim_win_get_config(win)
+  if c.relative ~= 'editor' then return false end
+  api.nvim_win_set_config(win, {
+    relative = 'editor',
+    row = c.row + row - cur[1],
+    col = c.col + col - cur[2],
+    width = math.max(1, c.width + w - cur[3]),
+    height = math.max(1, c.height + h - cur[4]),
+  })
+  return true
+end
+
 -- the layout node holding `win`: 'row' or 'col', and whether `win` is first
 local function placement(win)
   local function find(node)
@@ -124,6 +159,11 @@ api.nvim_create_autocmd('WinNew', {
     local dir, first = placement(win)
     if not dir then return end
     local from = vim.fn.win_getid(vim.fn.winnr('#'))
+    -- Neovim doesn't keep the scroll when splitting an external window
+    if shown(from) and api.nvim_win_get_buf(from) == api.nvim_win_get_buf(win) then
+      local view = api.nvim_win_call(from, vim.fn.winsaveview)
+      vim.fn.winrestview(view)
+    end
     vim.rpcnotify(chan, 'neorex_split', win, dir == 'row', first, shown(from) and from or 0)
   end,
 })
@@ -146,8 +186,12 @@ local function report()
     api.nvim_set_current_win(to)
     return
   end
-  -- a float shows in the pane it floats over, which stays focused
-  if api.nvim_win_get_config(cur).relative ~= '' then return end
+  -- a float shows in the pane it floats over, which stays focused, unless
+  -- it's in a Rex floating pane: the daemon decides
+  if api.nvim_win_get_config(cur).relative ~= '' then
+    vim.rpcnotify(chan, 'neorex_float', cur)
+    return
+  end
   last = cur
   vim.rpcnotify(chan, 'neorex_win', cur)
 end

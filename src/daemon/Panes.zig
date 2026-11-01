@@ -1,9 +1,10 @@
-//! The daemon's panes, found by id, Neovim window or Rex block. Pointers
+//! The daemon's panes, found by id, Neovim window, Rex block or float group. Pointers
 //! into it are only good until a pane is added or removed.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Pane = @import("Pane.zig");
+const FloatGroups = @import("../screen/FloatGroups.zig");
 
 const Panes = @This();
 
@@ -34,6 +35,13 @@ pub fn addForWindow(self: *Panes, gpa: Allocator, win: Pane.NeovimWindowHandle) 
     return p;
 }
 
+/// Adds a floating pane for group `g`, with the next id.
+pub fn addForGroup(self: *Panes, gpa: Allocator, g: FloatGroups.Group) !*Pane {
+    const p = try self.add(gpa, Pane.fromGroup(self.next_id, g));
+    self.next_id += 1;
+    return p;
+}
+
 /// Hangs up pane `i` and forgets it. Set its `closing` first.
 pub fn remove(self: *Panes, gpa: Allocator, io: std.Io, i: usize) void {
     var p = self.list.orderedRemove(i);
@@ -58,6 +66,11 @@ pub fn byWin(self: *const Panes, win: i64) ?*Pane {
 
 pub fn byBlock(self: *const Panes, block: []const u8) ?*Pane {
     for (self.list.items) |*p| if (p.rex_block) |*b| if (std.mem.eql(u8, b, block)) return p;
+    return null;
+}
+
+pub fn byLayerKey(self: *const Panes, key: i64) ?*Pane {
+    for (self.list.items) |*p| if (p.layer) |l| if (l.group.key == key) return p;
     return null;
 }
 

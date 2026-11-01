@@ -17,7 +17,7 @@ pub const Event = struct {
     /// The other end hung up. There may still be bytes to read first.
     eof: bool,
 
-    pub const Kind = enum { read, signal };
+    pub const Kind = enum { read, signal, timer };
 };
 
 pub fn init() !Loop {
@@ -68,6 +68,12 @@ pub fn addSignal(self: *Loop, sig: std.c.SIG, token: usize) !void {
     try self.change(n, std.c.EVFILT.SIGNAL, std.c.EV.ADD, token);
 }
 
+/// Fires once, `ms` milliseconds from now. Adding timer `id` again
+/// restarts it.
+pub fn addTimer(self: *const Loop, id: usize, ms: u32, token: usize) !void {
+    try self.changeData(id, std.c.EVFILT.TIMER, std.c.EV.ADD | std.c.EV.ONESHOT, token, ms);
+}
+
 /// Blocks until something is ready, then fills the start of `buf`.
 pub fn wait(self: *const Loop, buf: []Event) ![]Event {
     var raw: [64]std.c.Kevent = undefined;
@@ -85,6 +91,7 @@ pub fn wait(self: *const Loop, buf: []Event) ![]Event {
             .kind = switch (e.filter) {
                 std.c.EVFILT.READ => .read,
                 std.c.EVFILT.SIGNAL => .signal,
+                std.c.EVFILT.TIMER => .timer,
                 else => unreachable, // only these are registered
             },
             .eof = e.flags & std.c.EV.EOF != 0,
@@ -95,12 +102,16 @@ pub fn wait(self: *const Loop, buf: []Event) ![]Event {
 
 /// Registers one change with the kqueue.
 fn change(self: *const Loop, ident: usize, filter: i16, flags: u16, token: usize) !void {
+    try self.changeData(ident, filter, flags, token, 0);
+}
+
+fn changeData(self: *const Loop, ident: usize, filter: i16, flags: u16, token: usize, data: isize) !void {
     const changes = [_]std.c.Kevent{.{
         .ident = ident,
         .filter = filter,
         .flags = flags,
         .fflags = 0,
-        .data = 0,
+        .data = data,
         .udata = token,
     }};
     var none: [0]std.c.Kevent = undefined;
@@ -160,4 +171,12 @@ test "signals arrive as events and the old action comes back" {
     var now: std.c.Sigaction = undefined;
     std.posix.sigaction(.USR1, null, &now);
     try testing.expect(now.handler.handler != std.c.SIG.IGN);
+}
+
+test "a timer fires once" {
+    var loop: Loop = try .init();
+    defer loop.deinit();
+    try loop.addTimer(1, 5, 11);
+    var buf: [4]Event = undefined;
+    try testing.expectEqualSlices(Event, &.{.{ .token = 11, .kind = .timer, .eof = false }}, try loop.wait(&buf));
 }

@@ -5,6 +5,7 @@ const std = @import("std");
 const ids = @import("../rex/ids.zig");
 const Surface = @import("Surface.zig");
 const Loop = @import("Loop.zig");
+const FloatGroups = @import("../screen/FloatGroups.zig");
 
 const Pane = @This();
 
@@ -16,6 +17,12 @@ neovim_window_handle: ?NeovimWindowHandle = null,
 /// Owned.
 terminal_surface: ?*Surface = null,
 closing: ?Close = null,
+/// Set for a Rex floating pane showing a group of floats, not a window.
+layer: ?Layer = null,
+/// Where Rex put the pane in its window, as fractions: x, y, w, h.
+rect: ?[4]f64 = null,
+/// A new split's terminal starts at Rex's default size: keep the guessed window size until the app's first resize.
+awaiting_layout: bool = false,
 last_asked_win_size: struct { grid: u32 = 0, cols: u32 = 0, rows: u32 = 0 } = .{},
 
 /// Never 0: Neovim's API reads 0 as the current window.
@@ -23,6 +30,28 @@ pub const NeovimWindowHandle = i64;
 
 pub const RexBlock = ids.Block;
 pub const rexBlock = ids.block;
+pub const RexLayer = ids.Layer;
+pub const rexLayer = ids.layer;
+
+pub const Fit = union(enum) {
+    none,
+    /// The request's id.
+    asked: u32,
+    /// Answered: the next flush has the new layout.
+    answered,
+};
+
+pub const Layer = struct {
+    group: FloatGroups.Group,
+    /// Rex's id for it, once made.
+    id: ?RexLayer = null,
+    /// Its floats being refitted to its first size: not drawn until Neovim
+    /// has answered and redrawn them, so the guessed size never shows.
+    fit: Fit = .none,
+    /// Where it sits in the window, as fractions: x, y, w, h. What we asked
+    /// for, until the user moves it.
+    bounds: [4]f64 = .{ 0, 0, 0, 0 },
+};
 
 pub const Close = enum {
     /// The terminal is already gone, so it isn't restored.
@@ -36,6 +65,11 @@ pub const Close = enum {
 pub fn fromNeovimWindow(id: u32, window_handle: NeovimWindowHandle) Pane {
     std.debug.assert(window_handle != 0);
     return .{ .id = id, .neovim_window_handle = window_handle };
+}
+
+/// A Rex floating pane for a group of floats.
+pub fn fromGroup(id: u32, group: FloatGroups.Group) Pane {
+    return .{ .id = id, .layer = .{ .group = group } };
 }
 
 /// e.g. Cmd+D. Not used yet.
@@ -53,6 +87,16 @@ pub fn drawable(self: Pane) bool {
     return self.neovim_window_handle != null and
         self.terminal_surface != null and
         self.closing == null;
+}
+
+/// A floating pane ready to draw its floats.
+pub fn layerShown(self: Pane) bool {
+    return self.layer != null and self.terminal_surface != null and self.closing == null and self.layer.?.fit == .none;
+}
+
+/// A floating pane shown or on its way: its floats stay out of other panes.
+pub fn layerHides(self: Pane) bool {
+    return self.layer != null and self.closing == null;
 }
 
 pub const Part = enum { rex_block, terminal_surface, neovim_window };
