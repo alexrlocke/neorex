@@ -129,8 +129,8 @@ pub fn setHl(style: *const Style, hl: u32, w: *Writer, current: *?u32) Writer.Er
 }
 
 /// One SGR sequence that resets, then sets everything in `attr`. Colors an
-/// `attr` leaves null use the style's defaults; if those are null too, the
-/// terminal's own (from ext_termcolors).
+/// `attr` leaves null use its palette index, then the style's defaults; if
+/// those are null too, the terminal's own (from ext_termcolors).
 pub fn writeSgr(attr: Style.Attr, style: *const Style, w: *Writer) Writer.Error!void {
     try w.writeAll("\x1b[0");
     if (attr.bold) try w.writeAll(";1");
@@ -149,8 +149,8 @@ pub fn writeSgr(attr: Style.Attr, style: *const Style, w: *Writer) Writer.Error!
         .dotted => ";4:4",
         .dashed => ";4:5",
     });
-    try writeColor(w, 38, attr.fg orelse style.default_fg);
-    try writeColor(w, 48, attr.bg orelse style.default_bg);
+    try writeLayer(w, 30, attr.fg, attr.fg_idx, style.default_fg);
+    try writeLayer(w, 40, attr.bg, attr.bg_idx, style.default_bg);
     if (attr.underline != .none) try writeColor(w, 58, attr.sp orelse style.default_sp);
     try w.writeByte('m');
 }
@@ -159,6 +159,21 @@ pub fn writeSgr(attr: Style.Attr, style: *const Style, w: *Writer) Writer.Error!
 fn writeColor(w: *Writer, prefix: u8, color: ?u24) Writer.Error!void {
     const c = color orelse return;
     try w.print(";{d};2;{d};{d};{d}", .{ prefix, c >> 16, (c >> 8) & 0xff, c & 0xff });
+}
+
+/// Text (`base` 30) or background (40) color: RGB, else the palette index,
+/// else the default.
+fn writeLayer(w: *Writer, base: u8, rgb: ?u24, idx: ?u8, default: ?u24) Writer.Error!void {
+    if (rgb == null) if (idx) |i| return writeIndexed(w, base, i);
+    try writeColor(w, base + 8, rgb orelse default);
+}
+
+/// Palette color `i` with `base` 30 (fg) or 40 (bg): `;34`, `;94` for the
+/// bright half, `;38;5;i` past 15.
+fn writeIndexed(w: *Writer, base: u8, i: u8) Writer.Error!void {
+    if (i < 8) return w.print(";{d}", .{base + i});
+    if (i < 16) return w.print(";{d}", .{base + 60 + i - 8});
+    try w.print(";{d};5;{d}", .{ base + 8, i });
 }
 
 const testing = std.testing;
@@ -275,6 +290,16 @@ test "rows are cut at the terminal's width; past a narrow grid is cleared" {
     w.end = 0;
     try drawRow(f.g.row(0), &f.s, 0, 6, &w, &current);
     try testing.expectEqualStrings("\x1b[1;1Hab界\x1b[0m\x1b[K", w.buffered());
+}
+
+test "sgr draws palette indices when RGB is null" {
+    var s: Style = .{ .default_fg = 0x010203 };
+    var buf: [64]u8 = undefined;
+    var w: Writer = .fixed(&buf);
+    // RGB wins over the index; an index stands in for the default
+    try writeSgr(.{ .fg = 0xff0000, .fg_idx = 4, .bg_idx = 12 }, &s, &w);
+    try writeSgr(.{ .fg_idx = 3, .bg_idx = 200 }, &s, &w);
+    try testing.expectEqualStrings("\x1b[0;38;2;255;0;0;104m" ++ "\x1b[0;33;48;5;200m", w.buffered());
 }
 
 test "sgr uses defaults for null colors" {

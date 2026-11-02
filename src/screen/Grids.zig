@@ -564,6 +564,45 @@ test "hl_attr_define and default colors" {
     try testing.expectEqual(@as(usize, 6), s.attrs.items.len);
 }
 
+test "hl_attr_define keeps palette indices only without RGB colors" {
+    var gs: Grids = .{};
+    defer gs.deinit(testing.allocator);
+    _ = try applyTest(&gs, struct {
+        fn define(w: *Writer, id: i64, bg: ?i64) !void {
+            // ["hl_attr_define", [id, {background?}, {foreground: 4, background: 9}, []]]
+            try msgpack.writeArrayHeader(w, 2);
+            try msgpack.writeStr(w, "hl_attr_define");
+            try msgpack.writeArrayHeader(w, 4);
+            try msgpack.writeInt(w, id);
+            try msgpack.writeMapHeader(w, if (bg != null) 1 else 0);
+            if (bg) |c| {
+                try msgpack.writeStr(w, "background");
+                try msgpack.writeInt(w, c);
+            }
+            try msgpack.writeMapHeader(w, 2);
+            try msgpack.writeStr(w, "foreground");
+            try msgpack.writeInt(w, 4);
+            try msgpack.writeStr(w, "background");
+            try msgpack.writeInt(w, 9);
+            try msgpack.writeArrayHeader(w, 0);
+        }
+        fn f(w: *Writer) !void {
+            try msgpack.writeArrayHeader(w, 2);
+            try define(w, 1, null);
+            try define(w, 2, 0x112233);
+        }
+    }.f);
+    const only = gs.style.attrs.items[1];
+    try testing.expectEqual(@as(?u8, 4), only.fg_idx);
+    try testing.expectEqual(@as(?u8, 9), only.bg_idx);
+    // like the default Visual: an RGB background, and ctermfg only for
+    // 256-color terminals
+    const mixed = gs.style.attrs.items[2];
+    try testing.expectEqual(@as(?u8, null), mixed.fg_idx);
+    try testing.expectEqual(@as(?u8, null), mixed.bg_idx);
+    try testing.expectEqual(@as(?u24, 0x112233), mixed.bg);
+}
+
 test "cursor modes and busy" {
     var gs: Grids = .{};
     defer gs.deinit(testing.allocator);

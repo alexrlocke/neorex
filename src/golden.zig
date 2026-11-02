@@ -15,9 +15,9 @@ const gpa = testing.allocator;
 
 /// How a cell looks, from either side.
 const Look = struct {
-    fg: ?u24 = null,
-    bg: ?u24 = null,
-    ul_color: ?u24 = null,
+    fg: ?u32 = null,
+    bg: ?u32 = null,
+    ul_color: ?u32 = null,
     underline: u3 = 0,
     bold: bool = false,
     italic: bool = false,
@@ -42,6 +42,18 @@ const Look = struct {
     }
 };
 
+/// A palette color in a `Look`, apart from any RGB one.
+fn palette(i: u8) u32 {
+    return 1 << 24 | @as(u32, i);
+}
+
+/// RGB, else the palette index, else the default: as the renderer picks.
+fn pick(c: ?u24, idx: ?u8, default: ?u24) ?u32 {
+    if (c) |v| return v;
+    if (idx) |i| return palette(i);
+    return if (default) |v| v else null;
+}
+
 fn gridLook(g: *const Style, hl: u32) Look {
     const a = g.attr(hl);
     const underline: u3 = switch (a.underline) {
@@ -53,9 +65,9 @@ fn gridLook(g: *const Style, hl: u32) Look {
         .dashed => 5,
     };
     return .{
-        .fg = a.fg orelse g.default_fg,
-        .bg = a.bg orelse g.default_bg,
-        .ul_color = if (underline != 0) a.sp orelse g.default_sp else null,
+        .fg = pick(a.fg, a.fg_idx, g.default_fg),
+        .bg = pick(a.bg, a.bg_idx, g.default_bg),
+        .ul_color = if (underline != 0) pick(a.sp, null, g.default_sp) else null,
         .underline = underline,
         .bold = a.bold,
         .italic = a.italic,
@@ -72,11 +84,15 @@ fn termLook(pc: anytype) !Look {
     const s = pc.style();
     const underline: u3 = @intCast(@backingInt(s.flags.underline));
     // EL leaves blanks that carry only a background
-    const bg = if (pc.cell.content_tag == .bg_color_rgb) rgb(pc.cell.content.color_rgb) else try color(s.bg_color);
+    const bg = switch (pc.cell.content_tag) {
+        .bg_color_rgb => rgb(pc.cell.content.color_rgb),
+        .bg_color_palette => palette(pc.cell.content.color_palette.data),
+        else => color(s.bg_color),
+    };
     return .{
-        .fg = try color(s.fg_color),
+        .fg = color(s.fg_color),
         .bg = bg,
-        .ul_color = if (underline != 0) try color(s.underline_color) else null,
+        .ul_color = if (underline != 0) color(s.underline_color) else null,
         .underline = underline,
         .bold = s.flags.bold,
         .italic = s.flags.italic,
@@ -89,12 +105,11 @@ fn termLook(pc: anytype) !Look {
     };
 }
 
-fn color(c: anytype) !?u24 {
+fn color(c: anytype) ?u32 {
     return switch (c) {
         .none => null,
         .rgb => |v| rgb(v),
-        // the renderer only sends RGB
-        .palette => error.PaletteColor,
+        .palette => |i| palette(i),
     };
 }
 
