@@ -48,6 +48,14 @@ pub const kitty_push = "\x1b[>5u";
 /// Turns it back off: pops what `kitty_push` pushed.
 pub const kitty_pop = "\x1b[<u";
 
+/// Mode 2031: the terminal reports each change between a dark and a light
+/// theme, as a `dark_theme` event. Spec:
+/// https://contour-terminal.org/vt-extensions/color-palette-update-notifications/
+pub const theme_reports_on = "\x1b[?2031h";
+pub const theme_reports_off = "\x1b[?2031l";
+/// Asks for the theme now; the answer is a `dark_theme` event.
+pub const theme_query = "\x1b[?996n";
+
 /// Modifier keys held with a key or mouse event.
 pub const Mods = packed struct(u8) {
     shift: bool = false,
@@ -140,6 +148,9 @@ pub const Event = union(enum) {
     paste_end,
     /// The terminal gained (`true`) or lost (`false`) focus.
     focus: bool,
+    /// The terminal's theme is dark (`true`) or light (`false`): its answer
+    /// to `theme_query`, and what it sends on a change once `theme_reports_on`.
+    dark_theme: bool,
     mouse: Mouse,
     /// A sequence the parser doesn't know, as raw bytes. Valid until the next
     /// `next` or `feed`.
@@ -156,6 +167,7 @@ pub const Event = union(enum) {
             .paste => |text| try w.print("paste \"{f}\"", .{std.ascii.hexEscape(text, .lower)}),
             .paste_end => try w.writeAll("paste end"),
             .focus => |in| try w.writeAll(if (in) "focus in" else "focus out"),
+            .dark_theme => |dark| try w.writeAll(if (dark) "theme dark" else "theme light"),
             .mouse => |m| {
                 try w.print("mouse {s} {s} row={d} col={d}", .{ @tagName(m.button), @tagName(m.action), m.row, m.col });
                 if (!m.mods.isEmpty()) try writeMods(m.mods, w);
@@ -525,6 +537,11 @@ pub const Parser = struct {
         }
 
         if (self.marker == '<' and (final == 'M' or final == 'm')) return self.mouse(final == 'm');
+        // `CSI ? 997 ; 1 n` dark, `; 2 n` light
+        if (self.marker == '?' and final == 'n' and self.param(0, 0) == 997) switch (self.param(1, 0)) {
+            1, 2 => |v| return .{ .dark_theme = v == 1 },
+            else => {},
+        };
         if (self.marker != 0) return .{ .unknown = sequence };
 
         const mods = Mods.fromParam(self.param(1, 1));
@@ -837,6 +854,11 @@ test "sequences split across reads" {
     try expectEvents(&.{ "\x1b[1;", "5C" }, &.{testNamed(.right, .{ .ctrl = true })});
     try expectEvents(&.{ "\x1b[", "A" }, &.{testNamed(.up, .{})});
     try expectEvents(&.{ "\xc3", "\xa9" }, &.{testKey('é', .{})});
+}
+
+test "theme reports" {
+    try expectEvents(&.{ "\x1b[?997;1n", "\x1b[?997;2n" }, &.{ .{ .dark_theme = true }, .{ .dark_theme = false } });
+    try expectEvents(&.{"\x1b[?997;3n"}, &.{.{ .unknown = "\x1b[?997;3n" }});
 }
 
 test "unknown and broken input" {

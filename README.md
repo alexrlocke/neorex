@@ -47,6 +47,45 @@ zig-out/bin/neorex some/file.txt
 `neorex help` lists the debug commands, which run each layer on its own:
 keys, Neovim's redraw events, the renderer, and pane hand-off.
 
+## Following Rex's theme
+
+neorex keeps Neovim in step with Rex's theme:
+
+- **Light and dark.** neorex asks Rex to report theme changes (mode 2031)
+  and sets `'background'` to match, which reloads your colorscheme. Set
+  `vim.g.neorex_follow_theme = false` to keep `'background'` as you set it.
+- **Palette colors.** A highlight with only `ctermfg`/`ctermbg` (no RGB
+  color) is drawn as that palette color, so Rex fills it in from its current
+  theme and it changes when the theme does. Highlights with RGB colors are
+  drawn as before.
+
+`runtime/` has a colorscheme and a lualine theme, both named `neorex`, made
+only of the 16 palette colors, so Neovim takes on Rex's colors exactly. To
+use them only when Neovim runs in neorex (lazy.nvim / LazyVim shown):
+
+```lua
+-- neorex starts Neovim with `--listen $TMPDIR/neorex-<pid>.nvim.sock`
+local in_neorex = vim.v.servername:match("/neorex%-%d+%.nvim%.sock$") ~= nil
+if in_neorex then
+  vim.opt.rtp:append("/path/to/neorex/runtime")
+end
+
+return {
+  { "LazyVim/LazyVim", opts = { colorscheme = in_neorex and "neorex" or nil } },
+  {
+    "nvim-lualine/lualine.nvim",
+    opts = function(_, opts)
+      if not in_neorex then return end
+      opts.options.theme = "neorex"
+      -- the theme's middle section has no background, so drop the separator glyphs
+      opts.options.section_separators = { left = "", right = "" }
+    end,
+  },
+}
+```
+
+Plugins that set their own RGB colors keep them.
+
 ## Current limitations
 
 - The `<C-w>` resize, swap and move commands do nothing. Use Rex's own pane

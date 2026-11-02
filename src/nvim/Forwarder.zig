@@ -1,4 +1,5 @@
-//! Turns terminal input into Neovim API calls: keys, pastes, focus and mouse.
+//! Turns terminal input into Neovim API calls: keys, pastes, focus, mouse
+//! and the terminal's theme.
 
 const std = @import("std");
 const Writer = std.Io.Writer;
@@ -91,11 +92,22 @@ pub fn feed(self: *Forwarder, nvim: *Nvim, bytes: []const u8) !bool {
             args.col = to.col;
             try args.send(nvim, to.grid);
         },
+        .dark_theme => |dark| try setBackground(nvim, dark),
         .unknown => {},
     };
     try sendKeys(nvim, &keys);
     try nvim.flush();
     return true;
+}
+
+/// Sets 'background' to follow the terminal's theme, unless the user set
+/// `g:neorex_follow_theme` to false. Neovim reloads the colorscheme when
+/// 'background' changes, and does nothing when it doesn't.
+fn setBackground(nvim: *Nvim, dark: bool) !void {
+    _ = try nvim.execLua(
+        \\if vim.g.neorex_follow_theme ~= false then vim.o.background = ... end
+    , 1);
+    try msgpack.writeStr(nvim.writer(), if (dark) "dark" else "light");
 }
 
 /// Sends buffered keys with `nvim_input`, then empties the buffer.

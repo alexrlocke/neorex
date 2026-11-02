@@ -44,6 +44,12 @@ pub const Attr = struct {
     fg: ?u24 = null,
     bg: ?u24 = null,
     sp: ?u24 = null,
+    /// Palette indices from `cterm_attr`, kept only when the highlight has no
+    /// RGB color at all: a colorscheme that sets only ctermfg/ctermbg is
+    /// drawn in the terminal's own palette, so it follows the terminal's
+    /// theme.
+    fg_idx: ?u8 = null,
+    bg_idx: ?u8 = null,
     bold: bool = false,
     italic: bool = false,
     reverse: bool = false,
@@ -141,10 +147,18 @@ pub fn apply(self: *Style, gpa: Allocator, event: Event, d: *msgpack.Decoder, le
         .hl_attr_define => {
             if (len < 2) return error.BadMessage;
             const id = try expectInt(d, u32);
-            const a = try readAttr(d);
+            var a = try readAttr(d);
+            if (len >= 3) try readCtermColors(d, &a);
+            // A highlight with an RGB color belongs to an RGB colorscheme,
+            // whose palette indices are only for 256-color terminals: the
+            // default Visual is an RGB background with ctermfg=0 (black).
+            if (a.fg != null or a.bg != null or a.sp != null) {
+                a.fg_idx = null;
+                a.bg_idx = null;
+            }
             if (id >= self.attrs.items.len) try self.attrs.appendNTimes(gpa, .{}, id + 1 - self.attrs.items.len);
             self.attrs.items[id] = a;
-            return 2;
+            return if (len >= 3) 3 else 2;
         },
         .default_colors_set => {
             if (len < 3) return error.BadMessage;
@@ -237,8 +251,25 @@ fn readAttr(d: *msgpack.Decoder) !Attr {
             },
         }
     }
-    // cterm_attr and info: only RGB is used
     return a;
+}
+
+/// The palette colors from a `cterm_attr` map, into `a`. Its other keys
+/// repeat the RGB ones and are skipped.
+fn readCtermColors(d: *msgpack.Decoder, a: *Attr) !void {
+    const n = try rpc.expectMap(d);
+    for (0..n) |_| {
+        const key = try rpc.expectStr(d);
+        const idx = if (std.mem.eql(u8, key, "foreground"))
+            &a.fg_idx
+        else if (std.mem.eql(u8, key, "background"))
+            &a.bg_idx
+        else {
+            try rpc.skip(d);
+            continue;
+        };
+        idx.* = std.math.cast(u8, try rpc.expectInt(d));
+    }
 }
 
 const AttrKey = enum {
