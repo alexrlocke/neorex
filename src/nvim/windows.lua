@@ -202,7 +202,16 @@ local function schedule_report()
   pending = true
   vim.schedule(report)
 end
-api.nvim_create_autocmd('WinEnter', { group = group, callback = schedule_report })
+api.nvim_create_autocmd('WinEnter', {
+  group = group,
+  callback = function()
+    -- a float taking focus gets its own Rex pane: say so now, before the
+    -- redraw that first shows it
+    local win = api.nvim_get_current_win()
+    if api.nvim_win_get_config(win).relative ~= '' then vim.rpcnotify(chan, 'neorex_entered', win) end
+    schedule_report()
+  end,
+})
 
 -- a statusline came, went or changed: fit the windows to their panes again
 api.nvim_create_autocmd('OptionSet', {

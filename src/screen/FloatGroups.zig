@@ -1,7 +1,9 @@
 //! Floats to show in a Rex floating pane. A group is an editor
 //! float with every float hanging from it, as a picker builds its box,
-//! input, list and preview; groups that touch, as Telescope's do, are one.
-//! It goes native when something in it takes focus.
+//! input, list and preview; focusable groups that touch, as Telescope's
+//! do, are one. It goes native once something in it has taken focus:
+//! being focusable isn't enough, since completion menus are and are never
+//! entered. Those stay drawn in their pane, beside what they complete.
 
 const std = @import("std");
 const Grids = @import("Grids.zig");
@@ -21,6 +23,8 @@ pub const Group = struct {
     width: u32 = 0,
     height: u32 = 0,
     focusable: bool = false,
+    /// A float in it has been Neovim's current window.
+    entered: bool = false,
 
     pub fn topGrids(g: *const Group) []const u32 {
         return g.tops[0..g.tops_len];
@@ -46,6 +50,7 @@ pub const Group = struct {
     fn merge(a: *Group, b: Group) void {
         a.unite(b.row, b.col, b.width, b.height);
         a.focusable = a.focusable or b.focusable;
+        a.entered = a.entered or b.entered;
         a.key = @min(a.key, b.key);
         for (b.topGrids()) |t| if (a.tops_len < max_tops) {
             a.tops[a.tops_len] = t;
@@ -56,7 +61,7 @@ pub const Group = struct {
     /// Grows to cover the rect too.
     fn unite(g: *Group, row: i32, col: i32, width: u32, height: u32) void {
         if (g.width == 0) {
-            g.* = .{ .tops = g.tops, .tops_len = g.tops_len, .key = g.key, .focusable = g.focusable, .row = row, .col = col, .width = width, .height = height };
+            g.* = .{ .tops = g.tops, .tops_len = g.tops_len, .key = g.key, .focusable = g.focusable, .entered = g.entered, .row = row, .col = col, .width = width, .height = height };
             return;
         }
         const top = @min(g.row, row);
@@ -68,8 +73,9 @@ pub const Group = struct {
     }
 };
 
-/// The groups to show natively.
-pub fn find(grids: *const Grids, out: *[max_groups]Group) []Group {
+/// The groups to show natively: those with a float in `entered`, the
+/// float windows that have been current.
+pub fn find(grids: *const Grids, entered: []const i64, out: *[max_groups]Group) []Group {
     var all: [max_tops]Group = undefined;
     var n: usize = 0;
     // each editor float, with the floats hanging from it
@@ -88,6 +94,7 @@ pub fn find(grids: *const Grids, out: *[max_groups]Group) []Group {
             if (grid.width == 0 or grid.height == 0) continue;
             g.unite(mp.row, mp.col, grid.width, grid.height);
             g.focusable = g.focusable or m.float.focusable;
+            g.entered = g.entered or std.mem.indexOfScalar(i64, entered, m.win) != null;
         }
         if (g.width == 0) continue;
         all[n] = g;
@@ -108,7 +115,7 @@ pub fn find(grids: *const Grids, out: *[max_groups]Group) []Group {
     }
     var k: usize = 0;
     for (all[0..n]) |g| {
-        if (!g.focusable or k == out.len) continue;
+        if (!g.entered or k == out.len) continue;
         out[k] = g;
         k += 1;
     }
@@ -138,7 +145,7 @@ fn addFloat(gs: *Grids, grid: u32, win: i64, w: u32, h: u32, f: Grids.Float) !vo
     try gs.wins.put(testing.allocator, grid, .{ .win = win, .kind = .float, .float = f });
 }
 
-test "a picker's floats are one group; unfocusable ones aren't" {
+test "a picker's floats are one group; ones never entered aren't" {
     var gs: Grids = .{};
     defer gs.deinit(testing.allocator);
     // a picker as snacks makes it: an unfocusable box, input and list on it
@@ -151,9 +158,11 @@ test "a picker's floats are one group; unfocusable ones aren't" {
     try addFloat(&gs, 7, 1007, 30, 1, .{ .screen = .{ 40, 0 } });
     // the popup menu
     try addFloat(&gs, 8, -1, 30, 10, .{ .screen = .{ 40, 40 } });
+    // a focusable float nobody went into
+    try addFloat(&gs, 9, 1009, 20, 4, .{ .screen = .{ 30, 100 } });
 
     var buf: [max_groups]Group = undefined;
-    const groups = find(&gs, &buf);
+    const groups = find(&gs, &.{ 1004, 1007 }, &buf);
     try testing.expectEqual(2, groups.len);
     try testing.expectEqualSlices(u32, &.{7}, groups[1].topGrids());
     const g = groups[0];
@@ -177,10 +186,26 @@ test "editor floats side by side, as Telescope's, are one group" {
     try addFloat(&gs, 4, 1011, 40, 20, .{ .screen = .{ 5, 2 } });
     try addFloat(&gs, 5, 1012, 40, 23, .{ .screen = .{ 2, 43 } });
     var buf: [max_groups]Group = undefined;
-    const groups = find(&gs, &buf);
+    // only the prompt takes focus
+    const groups = find(&gs, &.{1010}, &buf);
     try testing.expectEqual(1, groups.len);
     try testing.expectEqual(@as(usize, 3), groups[0].tops_len);
     try testing.expectEqual(@as(i64, 1010), groups[0].key);
     try testing.expectEqual(@as(u32, 81), groups[0].width);
     try testing.expectEqual(@as(u32, 23), groups[0].height);
+}
+
+test "a completion menu under the command line stays in the pane" {
+    var gs: Grids = .{};
+    defer gs.deinit(testing.allocator);
+    // the command line popup, as noice makes it
+    try addFloat(&gs, 3, 1020, 62, 3, .{ .focusable = false, .screen = .{ 4, 40 } });
+    // blink's menu right under it: focusable, never entered
+    try addFloat(&gs, 4, 1021, 30, 8, .{ .screen = .{ 7, 41 } });
+    // and its scrollbar, on the menu
+    try addFloat(&gs, 5, 1022, 1, 3, .{ .anchor_grid = 4, .col = 29 });
+    var buf: [max_groups]Group = undefined;
+    try testing.expectEqual(0, find(&gs, &.{}, &buf).len);
+    // a float elsewhere was entered: still not these
+    try testing.expectEqual(0, find(&gs, &.{1000}, &buf).len);
 }

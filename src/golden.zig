@@ -383,7 +383,7 @@ const Multi = struct {
                         if (try m.gs.applyRedraw(gpa, &params)) try m.flushed();
                     } else if (try windows.parseNote(n.method, &params)) |note| switch (note) {
                         .current => |w| m.current = w,
-                        .reopen, .split, .float => {},
+                        .reopen, .split, .float, .entered => {},
                     };
                 },
                 .response => |r| {

@@ -24,6 +24,25 @@ ui_focused: bool = true,
 current_float: i64 = 0,
 /// The editor size last asked for.
 editor_size: [2]u32 = .{ 0, 0 },
+/// Float windows that have been current, newest last; the oldest drop
+/// off. Neovim never reuses a handle, so closed ones do no harm.
+entered_floats: [32]i64 = undefined,
+entered_len: u8 = 0,
+
+/// Float `win` became current: its group may go native.
+pub fn noteEntered(self: *NvimSession, win: i64) void {
+    if (std.mem.indexOfScalar(i64, self.enteredFloats(), win) != null) return;
+    if (self.entered_len == self.entered_floats.len) {
+        std.mem.copyForwards(i64, self.entered_floats[0 .. self.entered_len - 1], self.entered_floats[1..self.entered_len]);
+        self.entered_len -= 1;
+    }
+    self.entered_floats[self.entered_len] = win;
+    self.entered_len += 1;
+}
+
+pub fn enteredFloats(self: *const NvimSession) []const i64 {
+    return self.entered_floats[0..self.entered_len];
+}
 
 /// Attaches as Neovim's UI at `cols` x `rows` and asks for our channel.
 pub fn attachUi(self: *NvimSession, cols: u32, rows: u32) !void {
@@ -53,4 +72,15 @@ fn editorSize(p: *const Pane) ?[2]u32 {
         @max(cols, @as(u32, @intFromFloat(@round(@as(f64, @floatFromInt(cols)) / r[2])))),
         @max(rows, @as(u32, @intFromFloat(@round(@as(f64, @floatFromInt(rows)) / r[3])))),
     };
+}
+
+test "entered floats are kept once, and the oldest drop off" {
+    var s: NvimSession = .{ .client = undefined };
+    s.noteEntered(1000);
+    s.noteEntered(1000);
+    try std.testing.expectEqualSlices(i64, &.{1000}, s.enteredFloats());
+    for (0..s.entered_floats.len) |i| s.noteEntered(2000 + @as(i64, @intCast(i)));
+    try std.testing.expectEqual(s.entered_floats.len, s.enteredFloats().len);
+    try std.testing.expectEqual(@as(i64, 2000), s.enteredFloats()[0]);
+    try std.testing.expectEqual(@as(i64, 2031), s.enteredFloats()[31]);
 }
