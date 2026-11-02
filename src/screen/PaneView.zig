@@ -50,6 +50,8 @@ pub const Rect = struct {
     height: u32,
     on_screen: bool = false,
     on_msg: bool = false,
+    /// The editor float it hangs from, itself included; 0 if none.
+    top: u32 = 0,
 
     fn rows(r: Rect, limit: u32) struct { u32, u32 } {
         const top: u32 = @intCast(std.math.clamp(r.row, 0, @as(i64, limit)));
@@ -179,16 +181,78 @@ fn screenRows(grids: *const Grids) u32 {
 }
 
 /// Screen floats moved from grid 1 into the pane at `origin`, and kept
-/// inside it where they fit. Message floats keep to the bottom, as the
+/// inside it where they fit. Floats that go together move by the same
+/// amount, so they stay lined up: a float and those hanging from it, such
+/// as a border or a scrollbar, and floats that touch, such as a command
+/// line and the completion menu under it. Too big to fit, their top left
+/// shows, where the text starts. Message floats keep to the bottom, as the
 /// messages do.
 fn fitScreen(self: *const PaneView, rects: []Rect, origin: [2]i32, screen_rows: u32) []Rect {
+    std.debug.assert(rects.len <= Grids.max_floats);
     for (rects) |*r| if (r.on_screen) {
-        const up: i32 = if (r.on_msg) @as(i32, @intCast(screen_rows)) - @as(i32, @intCast(self.rows)) else origin[0];
-        r.row = fitInto(r.row - up, r.height, self.rows);
-        if (!r.on_msg) r.col -= origin[1];
-        r.col = fitInto(r.col, r.width, self.cols);
+        if (r.on_msg) {
+            const up = @as(i32, @intCast(screen_rows)) - @as(i32, @intCast(self.rows));
+            r.row = fitInto(r.row - up, r.height, self.rows);
+            r.col = fitInto(r.col, r.width, self.cols);
+            continue;
+        }
+        r.row -= origin[0];
+        r.col -= origin[1];
     };
+    // the floats that go together, each named by one of them
+    var set: [Grids.max_floats]u8 = undefined;
+    for (0..rects.len) |i| set[i] = @intCast(i);
+    var joined = true;
+    while (joined) {
+        joined = false;
+        for (rects, 0..) |a, i| for (rects[i + 1 ..], i + 1..) |b, j| {
+            if (set[i] == set[j] or !movable(a) or !movable(b) or !together(a, b)) continue;
+            const from = set[j];
+            for (set[0..rects.len]) |*x| if (x.* == from) {
+                x.* = set[i];
+            };
+            joined = true;
+        };
+    }
+    for (rects, 0..) |r, i| {
+        if (!movable(r) or set[i] != i) continue;
+        // the box around this set
+        var top: i64 = r.row;
+        var left: i64 = r.col;
+        var bottom: i64 = @as(i64, r.row) + r.height;
+        var right: i64 = @as(i64, r.col) + r.width;
+        for (rects, 0..) |m, k| if (set[k] == i) {
+            top = @min(top, m.row);
+            left = @min(left, m.col);
+            bottom = @max(bottom, @as(i64, m.row) + m.height);
+            right = @max(right, @as(i64, m.col) + m.width);
+        };
+        const down = fitStart(top, bottom - top, self.rows) - top;
+        const across = fitStart(left, right - left, self.cols) - left;
+        for (rects, 0..) |*m, k| if (set[k] == i) {
+            m.row = @intCast(m.row + down);
+            m.col = @intCast(m.col + across);
+        };
+    }
     return rects;
+}
+
+/// A screen float `fitScreen` may move with others.
+fn movable(r: Rect) bool {
+    return r.on_screen and !r.on_msg;
+}
+
+/// Hang from the same editor float, or overlap or touch.
+fn together(a: Rect, b: Rect) bool {
+    if (a.top != 0 and a.top == b.top) return true;
+    return a.row <= @as(i64, b.row) + b.height and b.row <= @as(i64, a.row) + a.height and
+        a.col <= @as(i64, b.col) + b.width and b.col <= @as(i64, a.col) + a.width;
+}
+
+/// `pos` moved back inside `0..limit` if `len` fits there, else to 0.
+fn fitStart(pos: i64, len: i64, limit: u32) i64 {
+    if (len > limit) return 0;
+    return std.math.clamp(pos, 0, limit - len);
 }
 
 /// `pos` moved back inside `0..limit` if `len` fits there.
@@ -312,7 +376,7 @@ fn floatRects(grids: *const Grids, placed: []const Grids.Placed, out: *[Grids.ma
     for (placed) |p| {
         const f = grids.get(p.grid) orelse continue;
         if (f.width == 0 or f.height == 0) continue;
-        out[n] = .{ .grid = p.grid, .row = p.row, .col = p.col, .width = f.width, .height = f.height, .on_screen = p.on_screen, .on_msg = p.on_msg };
+        out[n] = .{ .grid = p.grid, .row = p.row, .col = p.col, .width = f.width, .height = f.height, .on_screen = p.on_screen, .on_msg = p.on_msg, .top = p.top };
         n += 1;
     }
     return out[0..n];
@@ -406,6 +470,43 @@ test "screen floats move into the pane and stay inside it" {
     try testing.expectEqual(@as(i32, 1), rects[2].col);
     try testing.expectEqual(@as(i32, 5), rects[3].row);
     try testing.expectEqual(@as(i32, 2), rects[3].col);
+}
+
+test "a command line and its menu move into a narrow pane together" {
+    // a pane 40 wide at column 40 of an 80 wide screen
+    const view: PaneView = .init(40, 20);
+    var rects = [_]Rect{
+        // noice's box, wider than the pane, and its text inside the border
+        .{ .grid = 3, .row = 2, .col = 8, .width = 64, .height = 3, .on_screen = true, .top = 3 },
+        .{ .grid = 4, .row = 3, .col = 10, .width = 60, .height = 1, .on_screen = true, .top = 3 },
+        // blink's menu over the box's bottom border, and its scrollbar
+        .{ .grid = 5, .row = 4, .col = 8, .width = 39, .height = 10, .on_screen = true, .top = 5 },
+        .{ .grid = 6, .row = 4, .col = 47, .width = 1, .height = 10, .on_screen = true, .top = 5 },
+        // a notification far off: on its own
+        .{ .grid = 7, .row = 18, .col = 75, .width = 4, .height = 1, .on_screen = true, .top = 7 },
+    };
+    _ = view.fitScreen(&rects, .{ 0, 40 }, 24);
+    // too wide: the left edge shows, everything moved alike
+    try testing.expectEqual(@as(i32, 0), rects[0].col);
+    try testing.expectEqual(@as(i32, 2), rects[1].col);
+    try testing.expectEqual(@as(i32, 0), rects[2].col);
+    try testing.expectEqual(@as(i32, 39), rects[3].col);
+    for (rects[0..4], [_]i32{ 2, 3, 4, 4 }) |r, row| try testing.expectEqual(row, r.row);
+    // kept inside on its own: 75 - 40, then left to fit
+    try testing.expectEqual(@as(i32, 35), rects[4].col);
+    try testing.expectEqual(@as(i32, 18), rects[4].row);
+}
+
+test "a scrollbar stays on its menu when the menu is moved in" {
+    const view: PaneView = .init(30, 10);
+    var rects = [_]Rect{
+        // past the right edge
+        .{ .grid = 3, .row = 1, .col = 25, .width = 10, .height = 4, .on_screen = true, .top = 3 },
+        .{ .grid = 4, .row = 1, .col = 35, .width = 1, .height = 4, .on_screen = true, .top = 3 },
+    };
+    _ = view.fitScreen(&rects, .{ 0, 0 }, 10);
+    try testing.expectEqual(@as(i32, 19), rects[0].col);
+    try testing.expectEqual(@as(i32, 29), rects[1].col);
 }
 
 test "frameFloats draws a group on its own and the cursor in it" {

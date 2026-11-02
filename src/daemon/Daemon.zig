@@ -1,7 +1,7 @@
 //! The running daemon: Neovim, its grids, the Rex connection, a pane per
-//! window and a floating pane per group of large floats. After each Neovim
-//! flush, `reconcile` gives new windows and float groups panes and hangs up
-//! panes whose windows closed; then every pane is drawn.
+//! window and a floating pane per group of floats that took focus. After
+//! each Neovim flush, `reconcile` gives new windows and float groups panes
+//! and hangs up panes whose windows closed; then every pane is drawn.
 // TODO: Needs a pretty major rewrite
 
 const std = @import("std");
@@ -346,6 +346,7 @@ fn onNvim(self: *Daemon) !void {
             } else if (try windows.parseNote(n.method, &params)) |note| switch (note) {
                 .current => |win| try self.onCurrent(win),
                 .float => |win| try self.onCurrentFloat(win),
+                .entered => |win| try self.onEnteredFloat(win),
                 .reopen => |win| if (self.panes.byWin(win) != null) try self.changes.markReopening(self.gpa, win),
                 .split => |sp| if (self.panes.byWin(sp.win) == null) try self.changes.noteSplit(self.gpa, sp),
             };
@@ -397,6 +398,16 @@ fn onCurrentFloat(self: *Daemon, win: i64) !void {
     self.nvim.current_float = win;
     const p = self.layerOfWin(win) orelse return;
     try self.rex.focus(p.rex_block);
+}
+
+/// A float took focus. Usually before it's drawn, so the next flush gives
+/// its group a floating pane; if it's already showing in a pane, now.
+fn onEnteredFloat(self: *Daemon, win: i64) !void {
+    self.nvim.noteEntered(win);
+    if (!self.nvim.ready or self.grids.gridOf(win) == null or self.layerOfWin(win) != null) return;
+    try self.reconcileLayers();
+    try self.nvim.client.flush();
+    try self.draw();
 }
 
 /// Matches panes to windows: new external windows get panes, ordinary ones
@@ -625,7 +636,7 @@ fn rect4(v: ?std.json.Value) ?[4]f64 {
 /// never moved to follow its floats, they follow it.
 fn reconcileLayers(self: *Daemon) !void {
     var buf: [FloatGroups.max_groups]FloatGroups.Group = undefined;
-    const groups = if (self.rex.conn != .closed) FloatGroups.find(&self.grids, &buf) else buf[0..0];
+    const groups = if (self.rex.conn != .closed) FloatGroups.find(&self.grids, self.nvim.enteredFloats(), &buf) else buf[0..0];
     var i = self.panes.list.items.len;
     while (i > 0) {
         i -= 1;

@@ -80,6 +80,8 @@ pub const Note = union(enum) {
     split: Split,
     /// The current window is now this float.
     float: i64,
+    /// This float was just entered; sent before the redraw that shows it.
+    entered: i64,
 };
 
 /// Where a new window sits in Neovim's layout.
@@ -103,6 +105,8 @@ pub fn parseNote(method: []const u8, params: *msgpack.Decoder) !?Note {
         .split
     else if (std.mem.eql(u8, method, "neorex_float"))
         .float
+    else if (std.mem.eql(u8, method, "neorex_entered"))
+        .entered
     else
         return null;
     if (try rpc.expectArray(params) < if (tag == .split) @as(u32, 4) else 1) return error.BadMessage;
@@ -111,6 +115,7 @@ pub fn parseNote(method: []const u8, params: *msgpack.Decoder) !?Note {
         .current => .{ .current = win },
         .reopen => .{ .reopen = win },
         .float => .{ .float = win },
+        .entered => .{ .entered = win },
         .split => .{ .split = .{
             .win = win,
             .side_by_side = try rpc.expectBool(params),
