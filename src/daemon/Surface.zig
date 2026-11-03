@@ -48,18 +48,22 @@ pub fn destroy(self: *Surface, gpa: std.mem.Allocator, io: std.Io, restore: bool
     gpa.destroy(self);
 }
 
-pub fn windowSize(self: *const Surface) [2]u32 {
-    return .{ @max(self.view.cols, 1), @max(self.view.rows -| 1, 1) };
+/// The pane less `cmd_rows` (Neovim's 'cmdheight') for the message line.
+pub fn windowSize(self: *const Surface, cmd_rows: u32) [2]u32 {
+    return .{ @max(self.view.cols, 1), @max(self.view.rows -| cmd_rows, 1) };
 }
 
-test "the window is the pane less its message line, and never empty" {
+test "the window is the pane less its message lines, and never empty" {
     // windowSize only reads `view`
     var surface: Surface = .{ .helper_socket = undefined, .terminal = undefined, .view = .init(80, 24) };
-    try std.testing.expectEqual([2]u32{ 80, 23 }, surface.windowSize());
+    try std.testing.expectEqual([2]u32{ 80, 23 }, surface.windowSize(1));
+    try std.testing.expectEqual([2]u32{ 80, 22 }, surface.windowSize(2));
+    // 'cmdheight' 0: the window fills the pane
+    try std.testing.expectEqual([2]u32{ 80, 24 }, surface.windowSize(0));
 
     surface.view = .init(0, 0);
-    try std.testing.expectEqual([2]u32{ 1, 1 }, surface.windowSize());
+    try std.testing.expectEqual([2]u32{ 1, 1 }, surface.windowSize(1));
 
     surface.view = .init(10, 1);
-    try std.testing.expectEqual([2]u32{ 10, 1 }, surface.windowSize());
+    try std.testing.expectEqual([2]u32{ 10, 1 }, surface.windowSize(1));
 }

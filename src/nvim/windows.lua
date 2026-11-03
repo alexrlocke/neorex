@@ -262,6 +262,16 @@ api.nvim_create_autocmd('OptionSet', {
   callback = function() vim.schedule(refit) end,
 })
 
+-- each pane keeps 'cmdheight' rows for the command line: tell the daemon
+-- now and when it changes, so 0 lets the window reach the pane's bottom
+local function report_cmdheight() vim.rpcnotify(chan, 'neorex_cmdheight', vim.o.cmdheight) end
+api.nvim_create_autocmd('OptionSet', {
+  group = group,
+  pattern = 'cmdheight',
+  callback = function() vim.schedule(report_cmdheight) end,
+})
+report_cmdheight()
+
 -- :q in the last window quits Neovim: make it the tab's only ordinary window
 -- first. If Neovim then refuses (unsaved changes), the daemon adopts it again.
 api.nvim_create_autocmd('QuitPre', {

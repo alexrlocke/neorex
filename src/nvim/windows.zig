@@ -84,6 +84,8 @@ pub const Note = union(enum) {
     entered: i64,
     /// The file name a window shows, for its pane's label.
     title: Title,
+    /// 'cmdheight': the rows each pane keeps for the command line.
+    cmdheight: u32,
 };
 
 pub const Title = struct {
@@ -117,6 +119,8 @@ pub fn parseNote(method: []const u8, params: *msgpack.Decoder) !?Note {
         .entered
     else if (std.mem.eql(u8, method, "neorex_title"))
         .title
+    else if (std.mem.eql(u8, method, "neorex_cmdheight"))
+        .cmdheight
     else
         return null;
     const want: u32 = switch (tag) {
@@ -125,6 +129,8 @@ pub fn parseNote(method: []const u8, params: *msgpack.Decoder) !?Note {
         else => 1,
     };
     if (try rpc.expectArray(params) < want) return error.BadMessage;
+    // the one note that isn't about a window
+    if (tag == .cmdheight) return .{ .cmdheight = std.math.cast(u32, try rpc.expectInt(params)) orelse return error.BadMessage };
     const win = try rpc.expectHandle(params);
     return switch (tag) {
         .current => .{ .current = win },
@@ -132,6 +138,7 @@ pub fn parseNote(method: []const u8, params: *msgpack.Decoder) !?Note {
         .float => .{ .float = win },
         .entered => .{ .entered = win },
         .title => .{ .title = .{ .win = win, .name = try rpc.expectStr(params) } },
+        .cmdheight => unreachable,
         .split => .{ .split = .{
             .win = win,
             .side_by_side = try rpc.expectBool(params),
@@ -462,6 +469,48 @@ test "each window shows a statusline inside its pane" {
     try testing.expect(try h.until(struct {
         fn f(x: *Harness) bool {
             return gridHeight(x, x.wins[0]) == 9 and rowStarts(x, x.wins[0], 8, "MINE");
+        }
+    }.f));
+}
+
+fn lastCmdheight(h: *const Harness) ?u32 {
+    var i = h.notes.items.len;
+    while (i > 0) {
+        i -= 1;
+        if (h.notes.items[i] == .cmdheight) return h.notes.items[i].cmdheight;
+    }
+    return null;
+}
+
+test "'cmdheight' is reported at setup and when it changes" {
+    var buf: [1024]u8 = undefined;
+    var h: Harness = .{ .nvim = Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n" }, &buf) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    } };
+    defer h.deinit();
+    try h.nvim.uiAttach(40, 10, .{ .ext_multigrid = true });
+    h.chan_id = try askChannel(&h.nvim);
+    try h.nvim.flush();
+
+    // the default, sent during setup
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return x.wins[0] != 0 and lastCmdheight(x) == 1;
+        }
+    }.f));
+
+    try h.input(":set cmdheight=0<CR>");
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return lastCmdheight(x) == 0;
+        }
+    }.f));
+
+    try h.input(":set cmdheight=2<CR>");
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return lastCmdheight(x) == 2;
         }
     }.f));
 }

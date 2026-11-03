@@ -357,6 +357,7 @@ fn onNvim(self: *Daemon) !void {
                 .reopen => |win| if (self.panes.byWin(win) != null) try self.changes.markReopening(self.gpa, win),
                 .split => |sp| if (self.panes.byWin(sp.win) == null) try self.changes.noteSplit(self.gpa, sp),
                 .title => |t| try self.titles.set(self.gpa, t),
+                .cmdheight => |rows| try self.onCmdheight(rows),
             };
         },
         .request => |r| try self.nvim.client.respondError(r.id, "neorex serves no requests"),
@@ -375,7 +376,7 @@ fn onNvim(self: *Daemon) !void {
             if (r.err) |e| {
                 std.debug.print("neovim error: {s}\n", .{e});
             } else if (r.id == self.nvim.channel_req) {
-                const size = windowSize(self.panes.byId(startup_pane_id).?);
+                const size = self.windowSize(self.panes.byId(startup_pane_id).?);
                 self.nvim.setup_req = try windows.setup(self.nvim.client, try windows.parseChannel(&result), size[0], size[1]);
                 try self.nvim.client.flush();
             } else if (r.id == self.nvim.setup_req) {
@@ -387,6 +388,15 @@ fn onNvim(self: *Daemon) !void {
             }
         },
     };
+}
+
+/// 'cmdheight' changed: give each window the rows its pane no longer keeps
+/// for the command line, or take them back.
+fn onCmdheight(self: *Daemon, rows: u32) !void {
+    if (rows == self.nvim.cmd_rows) return;
+    self.nvim.cmd_rows = rows;
+    for (self.panes.list.items) |*p| try self.sizeWindow(p);
+    try self.nvim.client.flush();
 }
 
 /// Neovim's current window changed: focus its pane in Rex.
@@ -451,7 +461,7 @@ fn reconcile(self: *Daemon) !void {
     for (self.grids.wins.values()) |w| switch (w.kind) {
         .ordinary => {
             if (!try self.changes.shouldAdopt(self.gpa, w.win)) continue;
-            const size = if (self.panes.byWin(w.win)) |p| windowSize(p) else self.newWindowSize(w.win);
+            const size = if (self.panes.byWin(w.win)) |p| self.windowSize(p) else self.newWindowSize(w.win);
             try windows.adopt(self.nvim.client, w.win, size[0], size[1]);
         },
         .external => {
@@ -479,7 +489,7 @@ fn waitingPane(self: *const Daemon) ?*Pane {
 /// A guess until the new pane says its size: half the pane it splits.
 fn newWindowSize(self: *const Daemon, win: i64) [2]u32 {
     const size = self.newPaneSize(win);
-    return .{ size[0], @max(size[1] -| 1, 1) };
+    return .{ size[0], @max(size[1] -| self.nvim.cmd_rows, 1) };
 }
 
 /// A guess at a new split's terminal size, cols x rows: half the pane it splits.
@@ -818,7 +828,7 @@ fn sizeWindow(self: *Daemon, p: *Pane) !void {
     if (p.awaiting_layout) return;
     const win = p.neovim_window_handle orelse return;
     const grid = self.grids.gridOf(win) orelse return;
-    const size = s.windowSize();
+    const size = s.windowSize(self.nvim.cmd_rows);
     const last = p.last_asked_win_size;
     if (last.grid == grid and last.cols == size[0] and last.rows == size[1]) return;
     p.last_asked_win_size = .{ .grid = grid, .cols = size[0], .rows = size[1] };
@@ -846,6 +856,6 @@ fn gridOfPane(self: *const Daemon, pane: *const Pane) ?u32 {
 }
 
 /// No terminal yet: the smallest window, as Neovim allows.
-fn windowSize(p: *const Pane) [2]u32 {
-    return if (p.terminal_surface) |s| s.windowSize() else .{ 1, 1 };
+fn windowSize(self: *const Daemon, p: *const Pane) [2]u32 {
+    return if (p.terminal_surface) |s| s.windowSize(self.nvim.cmd_rows) else .{ 1, 1 };
 }
