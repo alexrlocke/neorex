@@ -505,6 +505,21 @@ test "each window shows a statusline inside its pane" {
         }
     }.f));
 
+    // a buffer new to the window starts with an empty local statusline:
+    // it's given back
+    try h.input(":set statusline=GLOBAL\\ %f<CR>");
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return rowStarts(x, x.wins[0], 8, "GLOBAL ");
+        }
+    }.f));
+    try h.input(":edit one | edit two | put! =&l:statusline<CR>");
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return rowStarts(x, x.wins[0], 0, "GLOBAL %f") and rowStarts(x, x.wins[0], 8, "GLOBAL two");
+        }
+    }.f));
+
     // no statusline: the text gets the row back
     try h.input(":set laststatus=0<CR>");
     try testing.expect(try h.until(struct {
