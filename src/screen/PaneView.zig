@@ -26,6 +26,10 @@ drawn_size: [2]u32 = .{ 0, 0 },
 /// Message rows drawn over the bottom last frame.
 drawn_msg: u32 = 0,
 drawn_cursor: ?render.Cursor = null,
+/// The cursor's look drawn last: a mode change alone, such as `i` with
+/// nothing else on screen changing, must still reach the terminal. Only
+/// the pane with the cursor needs it.
+drawn_mode: ?Style.CursorMode = null,
 /// The floats drawn last frame.
 drawn_floats: [Grids.max_floats]Rect = undefined,
 drawn_floats_len: u8 = 0,
@@ -110,7 +114,8 @@ pub fn frame(self: *PaneView, grids: *Grids, grid_id: ?u32, opts: Opts, w: *Writ
     const cur = self.cursorAt(grids, g, id, grid_rows, msg, msg_total, msg_n, rects);
     const grid_changed = floats_changed or if (g) |gr| gr.dirty.count() > 0 or gr.scrolls_len > 0 else false;
     const msg_changed = if (msg) |m| m.dirty.count() > 0 or msg_n != self.drawn_msg else msg_n != self.drawn_msg;
-    if (!self.full and !grid_changed and !msg_changed and std.meta.eql(cur, self.drawn_cursor)) return false;
+    const mode = style.cursorMode();
+    if (!self.full and !grid_changed and !msg_changed and std.meta.eql(cur, self.drawn_cursor) and (cur == null or std.meta.eql(mode, self.drawn_mode))) return false;
 
     try render.begin(w);
     var current: ?u32 = null;
@@ -171,6 +176,7 @@ pub fn frame(self: *PaneView, grids: *Grids, grid_id: ?u32, opts: Opts, w: *Writ
     self.drawn_size = size;
     self.drawn_msg = msg_n;
     self.drawn_cursor = cur;
+    self.drawn_mode = mode;
     @memcpy(self.drawn_floats[0..rects.len], rects);
     self.drawn_floats_len = @intCast(rects.len);
     return true;
@@ -295,7 +301,8 @@ pub fn frameFloats(self: *PaneView, grids: *Grids, placed: []const Grids.Placed,
         }
     }
     const cur = floatCursor(grids, rects, rows, self.cols);
-    if (!self.full and dirty.count() == 0 and std.meta.eql(cur, self.drawn_cursor)) return false;
+    const mode = style.cursorMode();
+    if (!self.full and dirty.count() == 0 and std.meta.eql(cur, self.drawn_cursor) and (cur == null or std.meta.eql(mode, self.drawn_mode))) return false;
 
     try render.begin(w);
     var current: ?u32 = null;
@@ -320,6 +327,7 @@ pub fn frameFloats(self: *PaneView, grids: *Grids, placed: []const Grids.Placed,
     self.drawn_grid = 0;
     self.drawn_size = .{ 0, 0 };
     self.drawn_cursor = cur;
+    self.drawn_mode = mode;
     @memcpy(self.drawn_floats[0..rects.len], rects);
     self.drawn_floats_len = @intCast(rects.len);
     return true;
@@ -535,4 +543,34 @@ test "frameFloats draws a group on its own and the cursor in it" {
     gs.grids.getPtr(3).?.dirty.unsetAll();
     gs.grids.getPtr(4).?.dirty.unsetAll();
     try testing.expect(!try view.frameFloats(&gs, &placed, .{ 10, 20 }, &out.writer));
+}
+
+test "a mode change alone redraws the cursor's shape" {
+    var gs: Grids = .{};
+    defer gs.deinit(testing.allocator);
+    try gs.grids.put(testing.allocator, 2, .{});
+    try gs.grids.getPtr(2).?.resize(testing.allocator, 6, 2);
+    gs.cursor_grid = 2;
+    gs.style.cursor_style_enabled = true;
+    try gs.style.cursor_modes.append(testing.allocator, .{ .shape = .block });
+    try gs.style.cursor_modes.append(testing.allocator, .{ .shape = .vertical });
+    var view: PaneView = .init(6, 2);
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try testing.expect(try view.frame(&gs, 2, .{}, &out.writer));
+    try testing.expect(!try view.frame(&gs, 2, .{}, &out.writer));
+
+    // insert mode with nothing else changing, as with no statusline or
+    // 'showmode': still a bar
+    out.clearRetainingCapacity();
+    gs.style.mode_idx = 1;
+    try testing.expect(try view.frame(&gs, 2, .{}, &out.writer));
+    try testing.expect(std.mem.indexOf(u8, out.written(), "\x1b[6 q") != null);
+    try testing.expect(!try view.frame(&gs, 2, .{}, &out.writer));
+
+    // a pane without the cursor has nothing to show for it
+    gs.cursor_grid = 3;
+    try testing.expect(try view.frame(&gs, 2, .{}, &out.writer));
+    gs.style.mode_idx = 0;
+    try testing.expect(!try view.frame(&gs, 2, .{}, &out.writer));
 }
