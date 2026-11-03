@@ -19,6 +19,8 @@ const Request = union(enum) {
     disown_block,
     close_block,
     close_layer,
+    set_block_label,
+    set_window_label,
 };
 
 /// Sent, not answered yet.
@@ -48,6 +50,10 @@ focused_block: union(enum) {
 
 /// The Rex window our panes are in, as the daemon last found in a view.
 window: ?[43]u8 = null,
+
+/// Our changes to the window's label: in flight, and the revision the last
+/// one landed at. Views from before then still show the old label.
+window_label: struct { in_flight: u32 = 0, applied_rev: i64 = 0 } = .{},
 
 /// A focus change from the same view as a `layout` update, sent after it.
 queued_focus: ?[]const u8 = null,
@@ -144,6 +150,24 @@ pub fn closeLayer(self: *Session, layer: []const u8) !void {
     try self.request(.close_layer, "session.close_layer", .{ .session_id = self.session_id, .layer_id = layer });
 }
 
+/// Sets a block's label; an empty one restores Rex's default.
+pub fn setBlockLabel(self: *Session, block: []const u8, label: []const u8) !void {
+    try self.request(.set_block_label, "session.set_block_label", .{ .session_id = self.session_id, .block_id = block, .label = label });
+}
+
+/// Sets our window's label; an empty one restores Rex's default.
+pub fn setWindowLabel(self: *Session, label: []const u8) !void {
+    if (self.conn == .closed) return;
+    const w = if (self.window) |*w| w else return;
+    try self.request(.set_window_label, "session.set_window_label", .{ .session_id = self.session_id, .window_id = @as([]const u8, w), .label = label });
+    self.window_label.in_flight += 1;
+}
+
+/// A view may still show the window's label from before our last change.
+pub fn windowLabelLanding(self: *const Session) bool {
+    return self.window_label.in_flight > 0 or self.view.rev < self.window_label.applied_rev;
+}
+
 /// Asks for a floating layer at `bounds` in our window, holding `layout`.
 pub fn newLayer(self: *Session, pane_id: u32, bounds: [4]f64, layout: anytype) !void {
     if (self.window) |*w| {
@@ -175,7 +199,8 @@ pub fn onResponse(self: *Session, res: Client.Response) !?Update {
         .view => return try self.onViewResult(res.result),
         .focus_block => try self.onFocusBlockResult(res.result),
         .attach => try self.onAttachResult(res.result),
-        .disown_block, .close_block, .close_layer => {},
+        .set_window_label => self.onSetWindowLabelResult(res.result),
+        .disown_block, .close_block, .close_layer, .set_block_label => {},
     }
     return null;
 }
@@ -252,6 +277,15 @@ fn newBlockId(ok: std.json.Value) ?[]const u8 {
     const block_ids = Client.get(ok, "block_ids") orelse return null;
     if (block_ids != .array or block_ids.array.items.len == 0) return null;
     return Client.str(block_ids.array.items[0]);
+}
+
+/// Records the revision our label change landed at.
+fn onSetWindowLabelResult(self: *Session, result: Client.Result) void {
+    self.window_label.in_flight -|= 1;
+    if (result == .ok) {
+        const rev = Client.getInt(result.ok, "revision") orelse 0;
+        if (rev > self.window_label.applied_rev) self.window_label.applied_rev = rev;
+    }
 }
 
 /// Records the revision our focus change landed at.
