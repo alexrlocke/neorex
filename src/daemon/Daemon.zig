@@ -23,6 +23,7 @@ const Panes = @import("Panes.zig");
 const RexSession = @import("../rex/Session.zig");
 const NvimSession = @import("NvimSession.zig");
 const WindowChanges = @import("WindowChanges.zig");
+const Titles = @import("Titles.zig");
 const Surface = @import("Surface.zig");
 const pane_helper = @import("pane_helper.zig");
 
@@ -39,6 +40,7 @@ panes: Panes = .{},
 rex: RexSession,
 nvim: NvimSession,
 changes: WindowChanges = .{},
+titles: Titles = .{},
 /// Set by `stop`; `run` returns it.
 stopped: ?StopReason = null,
 
@@ -72,6 +74,9 @@ const rex_default_size = [2]u32{ 80, 24 };
 const layer_frame = [2]i32{ 3, 2 };
 
 pub fn deinit(self: *Daemon) void {
+    // before the panes hang up: the launching pane outlives us
+    self.titles.restore(&self.panes, &self.rex);
+    self.titles.deinit(self.gpa);
     self.panes.deinit(self.gpa, self.io);
     self.grids.deinit(self.gpa);
     self.changes.deinit(self.gpa);
@@ -141,10 +146,12 @@ fn handle(self: *Daemon, e: Loop.Event) !void {
     }
 }
 
-/// After each batch of events: tells Neovim whether any pane has focus.
-/// Losing it waits a moment, in case another pane gains it.
+/// After each batch of events: tells Neovim whether any pane has focus,
+/// and names panes and the tab after their files. Losing focus waits a
+/// moment, in case another pane gains it.
 fn afterBatch(self: *Daemon) !void {
     try self.sendFocus(false);
+    try self.titles.sync(self.gpa, &self.panes, &self.rex, self.nvim.current_win);
 }
 
 fn sendFocus(self: *Daemon, waited: bool) !void {
@@ -349,6 +356,7 @@ fn onNvim(self: *Daemon) !void {
                 .entered => |win| try self.onEnteredFloat(win),
                 .reopen => |win| if (self.panes.byWin(win) != null) try self.changes.markReopening(self.gpa, win),
                 .split => |sp| if (self.panes.byWin(sp.win) == null) try self.changes.noteSplit(self.gpa, sp),
+                .title => |t| try self.titles.set(self.gpa, t),
             };
         },
         .request => |r| try self.nvim.client.respondError(r.id, "neorex serves no requests"),
@@ -424,6 +432,7 @@ fn reconcile(self: *Daemon) !void {
         const p = &self.panes.list.items[i];
         const win = p.neovim_window_handle orelse continue;
         if (self.grids.gridOf(win) != null) continue;
+        self.titles.forget(self.gpa, win);
         if (self.changes.takeReopening(win)) {
             p.neovim_window_handle = null;
             continue;
@@ -580,6 +589,7 @@ fn readLayout(self: *Daemon, wins: []const std.json.Value) void {
         if (!found) continue;
         const id = Client.getStr(w, "window_id") orelse continue;
         if (id.len == 43) self.rex.window = id[0..43].*;
+        self.titles.readWindow(self.gpa, &self.panes, &self.rex, w);
     }
 }
 

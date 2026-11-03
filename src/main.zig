@@ -84,6 +84,7 @@ test {
     _ = @import("daemon/Panes.zig");
     _ = @import("daemon/NvimSession.zig");
     _ = @import("daemon/WindowChanges.zig");
+    _ = @import("daemon/Titles.zig");
     _ = @import("daemon/Surface.zig");
     _ = @import("daemon/Daemon.zig");
     _ = @import("term/modes.zig");

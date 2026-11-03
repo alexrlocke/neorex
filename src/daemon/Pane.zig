@@ -24,6 +24,13 @@ rect: ?[4]f64 = null,
 /// A new split's terminal starts at Rex's default size: keep the guessed window size until the app's first resize.
 awaiting_layout: bool = false,
 last_asked_win_size: struct { grid: u32 = 0, cols: u32 = 0, rows: u32 = 0 } = .{},
+/// What it's named: its window's file name; owned.
+label: ?[]u8 = null,
+/// Its Rex block has `label` as its label.
+labeled: bool = false,
+/// Its terminal has `label` as its title. A pane run from a shell shows the
+/// running program's title in its header, not the block's label.
+titled: bool = false,
 
 /// Never 0: Neovim's API reads 0 as the current window.
 pub const NeovimWindowHandle = i64;
@@ -132,6 +139,7 @@ pub fn deinit(self: *Pane, gpa: std.mem.Allocator, io: std.Io) void {
     if (self.terminal_surface) |surface| {
         surface.destroy(gpa, io, self.closing != .rex_pane_closed);
     }
+    if (self.label) |l| gpa.free(l);
     self.* = undefined;
 }
 

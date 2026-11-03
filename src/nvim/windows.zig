@@ -82,6 +82,14 @@ pub const Note = union(enum) {
     float: i64,
     /// This float was just entered; sent before the redraw that shows it.
     entered: i64,
+    /// The file name a window shows, for its pane's label.
+    title: Title,
+};
+
+pub const Title = struct {
+    win: i64,
+    /// Points into the message: valid until the next read.
+    name: []const u8,
 };
 
 /// Where a new window sits in Neovim's layout.
@@ -107,15 +115,23 @@ pub fn parseNote(method: []const u8, params: *msgpack.Decoder) !?Note {
         .float
     else if (std.mem.eql(u8, method, "neorex_entered"))
         .entered
+    else if (std.mem.eql(u8, method, "neorex_title"))
+        .title
     else
         return null;
-    if (try rpc.expectArray(params) < if (tag == .split) @as(u32, 4) else 1) return error.BadMessage;
+    const want: u32 = switch (tag) {
+        .split => 4,
+        .title => 2,
+        else => 1,
+    };
+    if (try rpc.expectArray(params) < want) return error.BadMessage;
     const win = try rpc.expectHandle(params);
     return switch (tag) {
         .current => .{ .current = win },
         .reopen => .{ .reopen = win },
         .float => .{ .float = win },
         .entered => .{ .entered = win },
+        .title => .{ .title = .{ .win = win, .name = try rpc.expectStr(params) } },
         .split => .{ .split = .{
             .win = win,
             .side_by_side = try rpc.expectBool(params),
@@ -146,6 +162,8 @@ const Harness = struct {
     nvim: Nvim,
     grids: Grids = .{},
     notes: std.ArrayList(Note) = .empty,
+    /// Each window's last title, copied: a note's points into the read buffer.
+    titles: std.AutoArrayHashMapUnmanaged(i64, []u8) = .empty,
     setup_id: u32 = 0,
     chan_id: u32 = 0,
     wins: [2]i64 = .{ 0, 0 },
@@ -156,6 +174,8 @@ const Harness = struct {
     fn deinit(h: *Harness) void {
         h.grids.deinit(testing.allocator);
         h.notes.deinit(testing.allocator);
+        for (h.titles.values()) |t| testing.allocator.free(t);
+        h.titles.deinit(testing.allocator);
         h.nvim.deinit(testing.allocator);
     }
 
@@ -172,7 +192,13 @@ const Harness = struct {
                     var params = n.params;
                     if (std.mem.eql(u8, n.method, "redraw")) {
                         _ = try h.grids.applyRedraw(gpa, &params);
-                    } else if (try parseNote(n.method, &params)) |note| try h.notes.append(gpa, note);
+                    } else if (try parseNote(n.method, &params)) |note| switch (note) {
+                        .title => |t| {
+                            const name = try gpa.dupe(u8, t.name);
+                            if (try h.titles.fetchPut(gpa, t.win, name)) |old| gpa.free(old.value);
+                        },
+                        else => try h.notes.append(gpa, note),
+                    };
                 },
                 .response => |r| {
                     if (r.err) |e| {
@@ -344,6 +370,57 @@ fn rowStarts(h: *const Harness, win: i64, r: u32, want: []const u8) bool {
 fn gridHeight(h: *const Harness, win: i64) u32 {
     const g = h.grids.get(h.grids.gridOf(win) orelse return 0) orelse return 0;
     return g.height;
+}
+
+fn titleIs(h: *const Harness, win: i64, want: []const u8) bool {
+    return if (h.titles.get(win)) |t| std.mem.eql(u8, t, want) else false;
+}
+
+test "each window's title is its file name" {
+    var buf: [1024]u8 = undefined;
+    var h: Harness = .{ .nvim = Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n" }, &buf) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    } };
+    defer h.deinit();
+    try h.nvim.uiAttach(40, 10, .{ .ext_multigrid = true });
+    h.chan_id = try askChannel(&h.nvim);
+    try h.nvim.flush();
+
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return x.wins[0] != 0 and titleIs(x, x.wins[0], "[No Name]");
+        }
+    }.f));
+    const first, const anchor = h.wins;
+    // a new buffer in the same window
+    try h.input(":edit /tmp/neorex-dir/some file.txt<CR>");
+    h.want = first;
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return titleIs(x, x.want, "some file.txt");
+        }
+    }.f));
+    // a split onto another file: its own title, the first keeps its own
+    h.notes.clearRetainingCapacity();
+    try h.input(":split other.zig<CR>");
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            const cur = x.lastCurrent();
+            return cur != 0 and cur != x.want and titleIs(x, cur, "other.zig");
+        }
+    }.f));
+    try testing.expect(titleIs(&h, first, "some file.txt"));
+    // a directory goes by its own name
+    try h.input(":file /tmp/neorex-dir/<CR>");
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return titleIs(x, x.lastCurrent(), "neorex-dir");
+        }
+    }.f));
+    try testing.expect(titleIs(&h, first, "some file.txt"));
+    // the anchor is never named
+    try testing.expect(h.titles.get(anchor) == null);
 }
 
 test "each window shows a statusline inside its pane" {

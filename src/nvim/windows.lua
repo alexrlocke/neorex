@@ -168,6 +168,47 @@ api.nvim_create_autocmd('WinNew', {
   end,
 })
 
+-- window -> the title last sent for it: its file name, for its pane's label
+local titles = {}
+
+local function title_of(win)
+  local name = api.nvim_buf_get_name(api.nvim_win_get_buf(win)):gsub('/+$', '')
+  local t = name == '' and '[No Name]' or vim.fn.fnamemodify(name, ':t')
+  -- Rex takes up to 128 characters and no control characters
+  t = t:gsub('%c', '')
+  if vim.fn.strchars(t) > 128 then t = vim.fn.strcharpart(t, 0, 127) .. '…' end
+  return t
+end
+
+local function report_titles()
+  for _, win in ipairs(api.nvim_list_wins()) do
+    if shown(win) then
+      local t = title_of(win)
+      if titles[win] ~= t then
+        titles[win] = t
+        vim.rpcnotify(chan, 'neorex_title', win, t)
+      end
+    end
+  end
+  for win in pairs(titles) do
+    if not api.nvim_win_is_valid(win) then titles[win] = nil end
+  end
+end
+
+local titles_pending = false
+local function schedule_titles()
+  if titles_pending then return end
+  titles_pending = true
+  vim.schedule(function()
+    titles_pending = false
+    report_titles()
+  end)
+end
+api.nvim_create_autocmd({ 'BufWinEnter', 'BufEnter', 'BufFilePost', 'BufWritePost', 'WinNew' }, {
+  group = group,
+  callback = schedule_titles,
+})
+
 local pending = false
 local function report()
   pending = false
@@ -194,6 +235,7 @@ local function report()
   end
   last = cur
   vim.rpcnotify(chan, 'neorex_win', cur)
+  report_titles()
 end
 
 -- after the command that moved, so :windo and friends report once
