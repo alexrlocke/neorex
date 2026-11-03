@@ -17,6 +17,7 @@ const Grids = @import("../screen/Grids.zig");
 const FloatGroups = @import("../screen/FloatGroups.zig");
 const PaneView = @import("../screen/PaneView.zig");
 const Client = @import("../rex/Client.zig");
+const layout = @import("../rex/layout.zig");
 const Loop = @import("Loop.zig");
 const Pane = @import("Pane.zig");
 const Panes = @import("Panes.zig");
@@ -322,11 +323,7 @@ fn paneGone(self: *Daemon, p: *Pane) !void {
         try self.nvim.client.flush();
         return;
     }
-    var others = false;
-    for (self.panes.list.items) |q| {
-        if (q.id != p.id and q.closing != .request_failed and q.layer == null) others = true;
-    }
-    if (!others) {
+    if (!self.otherTiledPanes(p.id)) {
         self.stop(.pane_gone);
         return;
     }
@@ -336,6 +333,14 @@ fn paneGone(self: *Daemon, p: *Pane) !void {
     try self.changes.markClosing(self.gpa, win);
     try windows.close(self.nvim.client, win);
     try self.nvim.client.flush();
+}
+
+/// Another pane than `id` shows, or will show, an ordinary window.
+fn otherTiledPanes(self: *const Daemon, id: u32) bool {
+    for (self.panes.list.items) |q| {
+        if (q.id != id and q.closing != .request_failed and q.layer == null) return true;
+    }
+    return false;
 }
 
 // Neovim
@@ -577,26 +582,24 @@ fn onRexFocus(self: *Daemon, block: []const u8) !void {
 
 /// A newer view: where our panes sit, so the editor and floats fit.
 fn onLayout(self: *Daemon, wins: []const std.json.Value) !void {
-    self.readLayout(wins);
+    try self.readLayout(wins);
     if (self.focusedPane()) |f| try self.nvim.fitUiTo(f);
     try self.nvim.client.flush();
     try self.draw();
 }
 
 /// Remembers which Rex window holds our panes, and where each sits in it.
-fn readLayout(self: *Daemon, wins: []const std.json.Value) void {
+fn readLayout(self: *Daemon, wins: []const std.json.Value) !void {
     for (wins) |w| {
-        const layers = Client.get(w, "layers") orelse continue;
-        if (layers != .array) continue;
-        var found = false;
-        for (layers.array.items) |layer| {
-            if (!std.mem.eql(u8, Client.getStr(layer, "kind") orelse "", "tiled")) {
-                self.readLayerBounds(layer);
-                continue;
-            }
-            if (Client.get(layer, "layout")) |l| found = self.readRects(l) or found;
-        }
-        if (!found) continue;
+        var blocks = try layout.readWindow(self.gpa, w);
+        defer blocks.deinit(self.gpa);
+        for (blocks.floating.items) |f| self.onLayerBounds(f.block, f.rect);
+        var ours = false;
+        for (blocks.tiled.items) |t| if (self.panes.byBlock(t.block)) |p| {
+            p.rect = t.rect;
+            ours = true;
+        };
+        if (!ours) continue;
         const id = Client.getStr(w, "window_id") orelse continue;
         if (id.len == 43) self.rex.window = id[0..43].*;
         self.titles.readWindow(self.gpa, &self.panes, &self.rex, w);
@@ -605,48 +608,12 @@ fn readLayout(self: *Daemon, wins: []const std.json.Value) void {
 
 /// A floating layer of ours somewhere else: the user moved it, so its
 /// floats follow.
-fn readLayerBounds(self: *Daemon, layer: std.json.Value) void {
-    const bounds = rect4(Client.get(layer, "bounds")) orelse return;
-    const blocks = Client.get(layer, "blocks") orelse return;
-    if (blocks != .array or blocks.array.items.len == 0) return;
-    const p = self.panes.byBlock(Client.getStr(blocks.array.items[0], "block_id") orelse return) orelse return;
+fn onLayerBounds(self: *Daemon, block: []const u8, bounds: layout.Rect) void {
+    const p = self.panes.byBlock(block) orelse return;
     const l = if (p.layer) |*l| l else return;
     if (self.sameBounds(bounds, l.bounds)) return;
     l.bounds = bounds;
     _ = self.followLayer(p) catch {};
-}
-
-/// Finds our panes' blocks under layout node `node` and keeps their rects.
-fn readRects(self: *Daemon, node: std.json.Value) bool {
-    var found = false;
-    switch (node) {
-        .object => |o| {
-            if (Client.str(o.get("block_id"))) |b| if (self.panes.byBlock(b)) |p| if (rect4(o.get("rect"))) |r| {
-                p.rect = r;
-                found = true;
-            };
-            var it = o.iterator();
-            while (it.next()) |e| found = self.readRects(e.value_ptr.*) or found;
-        },
-        .array => |a| for (a.items) |x| {
-            found = self.readRects(x) or found;
-        },
-        else => {},
-    }
-    return found;
-}
-
-/// `[x, y, w, h]` as fractions.
-fn rect4(v: ?std.json.Value) ?[4]f64 {
-    const a = v orelse return null;
-    if (a != .array or a.array.items.len != 4) return null;
-    var out: [4]f64 = undefined;
-    for (a.array.items, &out) |x, *o| o.* = switch (x) {
-        .float => |f| f,
-        .integer => |n| @floatFromInt(n),
-        else => return null,
-    };
-    return out;
 }
 
 // floating panes
