@@ -255,6 +255,13 @@ api.nvim_create_autocmd('WinEnter', {
   end,
 })
 
+-- a window showing a buffer for the first time starts with an empty local
+-- statusline, and no OptionSet says so: give it back before the redraw
+api.nvim_create_autocmd('BufWinEnter', {
+  group = group,
+  callback = refit,
+})
+
 -- a statusline came, went or changed: fit the windows to their panes again
 api.nvim_create_autocmd('OptionSet', {
   group = group,
