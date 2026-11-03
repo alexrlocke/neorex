@@ -287,6 +287,11 @@ fn eql(a: ?[]const u8, b: []const u8) bool {
     return std.mem.eql(u8, a orelse return false, b);
 }
 
+/// The string field `name` of an object, as a value of enum `E`, or null.
+pub fn getEnum(comptime E: type, v: ?Value, name: []const u8) ?E {
+    return std.meta.stringToEnum(E, getStr(v, name) orelse return null);
+}
+
 const testing = std.testing;
 
 fn parseSample(gpa: std.mem.Allocator, json: []const u8) !std.json.Parsed(Value) {
