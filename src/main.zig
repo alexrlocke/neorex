@@ -93,6 +93,7 @@ test {
     _ = @import("rex/WebSocket.zig");
     _ = @import("rex/Client.zig");
     _ = @import("rex/Session.zig");
+    _ = @import("rex/layout.zig");
     _ = @import("rex/ids.zig");
     _ = @import("debug/PaneHost.zig");
     _ = debug_keys;
