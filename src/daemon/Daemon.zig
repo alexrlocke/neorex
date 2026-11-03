@@ -27,6 +27,7 @@ const WindowChanges = @import("WindowChanges.zig");
 const Titles = @import("Titles.zig");
 const Surface = @import("Surface.zig");
 const pane_helper = @import("pane_helper.zig");
+const sizing = @import("sizing.zig");
 
 const Daemon = @This();
 
@@ -66,9 +67,6 @@ const focus_out_delay_ms = 80;
 
 /// How long a new split waits for the app to size it before trusting its terminal's size.
 const layout_wait_ms = 1000;
-
-/// A new Rex terminal's size, cols x rows, until the app lays it out.
-const rex_default_size = [2]u32{ 80, 24 };
 
 /// About how many cells a Rex floating pane's frame takes, across and down.
 /// Only a first guess: once made, its floats fit whatever size it is.
@@ -187,7 +185,7 @@ fn accept(self: *Daemon, server: *net.Server) !void {
     try pane.registerWith(self.loop);
     if (pane.awaiting_layout) {
         const v = pane.terminal_surface.?.view;
-        if (v.cols != rex_default_size[0] or v.rows != rex_default_size[1]) {
+        if (v.cols != sizing.rex_default_size[0] or v.rows != sizing.rex_default_size[1]) {
             pane.awaiting_layout = false;
         } else try self.addTimer(.layout_timer, layout_wait_ms);
     }
@@ -286,7 +284,7 @@ fn newPane(self: *Daemon, win: i64) !void {
         return; // no anchor yet: next flush
     };
     // starts at the guess, not Rex's default
-    const size = self.newPaneSize(win);
+    const size = sizing.newPaneSize(self.splitFrom(sp), sp.side_by_side);
     const pane = try self.panes.addForWindow(self.gpa, win);
     pane.awaiting_layout = true;
     const pane_id = pane.id;
@@ -381,7 +379,7 @@ fn onNvim(self: *Daemon) !void {
             if (r.err) |e| {
                 std.debug.print("neovim error: {s}\n", .{e});
             } else if (r.id == self.nvim.channel_req) {
-                const size = self.windowSize(self.panes.byId(startup_pane_id).?);
+                const size = sizing.windowSize(self.panes.byId(startup_pane_id).?, self.nvim.cmd_rows);
                 self.nvim.setup_req = try windows.setup(self.nvim.client, try windows.parseChannel(&result), size[0], size[1]);
                 try self.nvim.client.flush();
             } else if (r.id == self.nvim.setup_req) {
@@ -466,7 +464,7 @@ fn reconcile(self: *Daemon) !void {
     for (self.grids.wins.values()) |w| switch (w.kind) {
         .ordinary => {
             if (!try self.changes.shouldAdopt(self.gpa, w.win)) continue;
-            const size = if (self.panes.byWin(w.win)) |p| self.windowSize(p) else self.newWindowSize(w.win);
+            const size = if (self.panes.byWin(w.win)) |p| sizing.windowSize(p, self.nvim.cmd_rows) else self.newWindowSize(w.win);
             try windows.adopt(self.nvim.client, w.win, size[0], size[1]);
         },
         .external => {
@@ -493,19 +491,8 @@ fn waitingPane(self: *const Daemon) ?*Pane {
 
 /// A guess until the new pane says its size: half the pane it splits.
 fn newWindowSize(self: *const Daemon, win: i64) [2]u32 {
-    const size = self.newPaneSize(win);
-    return .{ size[0], @max(size[1] -| self.nvim.cmd_rows, 1) };
-}
-
-/// A guess at a new split's terminal size, cols x rows: half the pane it splits.
-fn newPaneSize(self: *const Daemon, win: i64) [2]u32 {
     const sp = self.changes.splitOf(win);
-    const p = self.splitFrom(sp) orelse return rex_default_size;
-    const s = p.terminal_surface orelse return rex_default_size;
-    const cols = @max(s.view.cols, 1);
-    const rows = @max(s.view.rows, 2);
-    if (sp.side_by_side) return .{ @max(cols / 2, 1), rows };
-    return .{ cols, @max(rows / 2, 2) };
+    return sizing.newWindowSize(self.splitFrom(sp), sp.side_by_side, self.nvim.cmd_rows);
 }
 
 /// The pane a new window splits: its origin's, else the focused one.
@@ -820,9 +807,4 @@ fn focusedPane(self: *const Daemon) ?*Pane {
 fn gridOfPane(self: *const Daemon, pane: *const Pane) ?u32 {
     const win = pane.neovim_window_handle orelse return null;
     return self.grids.gridOf(win);
-}
-
-/// No terminal yet: the smallest window, as Neovim allows.
-fn windowSize(self: *const Daemon, p: *const Pane) [2]u32 {
-    return if (p.terminal_surface) |s| s.windowSize(self.nvim.cmd_rows) else .{ 1, 1 };
 }
