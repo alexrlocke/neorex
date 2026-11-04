@@ -82,8 +82,52 @@ local function refit()
 end
 
 --- Makes ordinary `win` external at `w` x `h`, giving its tab page an anchor first.
+-- the layout node directly holding `win`, a 'row' or 'col'
+local function parent_of(win)
+  local function find(node)
+    if node[1] == 'leaf' then return end
+    for _, c in ipairs(node[2]) do
+      if c[1] == 'leaf' and c[2] == win then return node end
+      local p = find(c)
+      if p then return p end
+    end
+  end
+  return find(vim.fn.winlayout(api.nvim_tabpage_get_number(api.nvim_win_get_tabpage(win))))
+end
+
+-- how much of its split `win` takes, in thousandths, across the split:
+-- ~500 after a plain :vsplit, less once a plugin sizes it (nvim-tree's width)
+local function share(win)
+  local p = parent_of(win)
+  if not p then return end
+  local wide = p[1] == 'row'
+  local function extent(w)
+    local pos = api.nvim_win_get_position(w)
+    local start = wide and pos[2] or pos[1]
+    return start, start + (wide and api.nvim_win_get_width(w) or api.nvim_win_get_height(w))
+  end
+  local lo, hi = math.huge, -math.huge
+  local function span(node)
+    if node[1] == 'leaf' then
+      local s, e = extent(node[2])
+      lo, hi = math.min(lo, s), math.max(hi, e)
+    else
+      for _, c in ipairs(node[2]) do span(c) end
+    end
+  end
+  span(p)
+  if hi <= lo then return end
+  local s, e = extent(win)
+  return math.floor((e - s) * 1000 / (hi - lo) + 0.5)
+end
+
 function M.adopt(win, w, h)
   if not shown(win) or api.nvim_win_get_config(win).external then return end
+  -- before the anchor below can change the layout; by now any plugin that
+  -- opened the window has sized it. Sent ahead of the redraw that shows it
+  -- external, so the daemon has it when it makes the window's pane.
+  local s = share(win)
+  if s then vim.rpcnotify(chan, 'neorex_share', win, s) end
   local tab = api.nvim_win_get_tabpage(win)
   if not anchor_of(tab) then
     local buf = api.nvim_create_buf(false, true)
@@ -139,15 +183,10 @@ end
 
 -- the layout node holding `win`: 'row' or 'col', and whether `win` is first
 local function placement(win)
-  local function find(node)
-    if node[1] == 'leaf' then return end
-    for i, c in ipairs(node[2]) do
-      if c[1] == 'leaf' and c[2] == win then return node[1], i == 1 end
-      local dir, first = find(c)
-      if dir then return dir, first end
-    end
-  end
-  return find(vim.fn.winlayout(api.nvim_tabpage_get_number(api.nvim_win_get_tabpage(win))))
+  local p = parent_of(win)
+  if not p then return end
+  local c = p[2][1]
+  return p[1], c[1] == 'leaf' and c[2] == win
 end
 
 -- before it's adopted, so its pane opens where Neovim put the window

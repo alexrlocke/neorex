@@ -78,6 +78,8 @@ pub const Note = union(enum) {
     reopen: i64,
     /// A new window, and where Neovim put it.
     split: Split,
+    /// How much of its split Neovim gave a new window, sent as it's adopted.
+    share: Share,
     /// The current window is now this float.
     float: i64,
     /// This float was just entered; sent before the redraw that shows it.
@@ -103,6 +105,15 @@ pub const Split = struct {
     before: bool,
     /// The window it was split from, or 0.
     from: i64,
+    /// Thousandths of its split, across it, that Neovim gave it once laid
+    /// out; 0 until `share` says.
+    share: u16 = 0,
+};
+
+pub const Share = struct {
+    win: i64,
+    /// Thousandths: 500 is half.
+    permille: u16,
 };
 
 /// A notification from the Lua, or null for any other.
@@ -113,6 +124,8 @@ pub fn parseNote(method: []const u8, params: *msgpack.Decoder) !?Note {
         .reopen
     else if (std.mem.eql(u8, method, "neorex_split"))
         .split
+    else if (std.mem.eql(u8, method, "neorex_share"))
+        .share
     else if (std.mem.eql(u8, method, "neorex_float"))
         .float
     else if (std.mem.eql(u8, method, "neorex_entered"))
@@ -125,7 +138,7 @@ pub fn parseNote(method: []const u8, params: *msgpack.Decoder) !?Note {
         return null;
     const want: u32 = switch (tag) {
         .split => 4,
-        .title => 2,
+        .title, .share => 2,
         else => 1,
     };
     if (try rpc.expectArray(params) < want) return error.BadMessage;
@@ -138,6 +151,7 @@ pub fn parseNote(method: []const u8, params: *msgpack.Decoder) !?Note {
         .float => .{ .float = win },
         .entered => .{ .entered = win },
         .title => .{ .title = .{ .win = win, .name = try rpc.expectStr(params) } },
+        .share => .{ .share = .{ .win = win, .permille = std.math.cast(u16, try rpc.expectInt(params)) orelse return error.BadMessage } },
         .cmdheight => unreachable,
         .split => .{ .split = .{
             .win = win,
@@ -364,6 +378,64 @@ test "windows become external; the anchor stays hidden" {
             return false;
         }
     }.f));
+}
+
+fn shareOf(h: *const Harness, win: i64) ?u16 {
+    for (h.notes.items) |n| if (n == .share and n.share.win == win) return n.share.permille;
+    return null;
+}
+
+fn newOrdinary(x: *Harness) bool {
+    const cur = x.lastCurrent();
+    return cur != 0 and x.kind(cur) == .ordinary;
+}
+
+fn wantShared(x: *Harness) bool {
+    return shareOf(x, x.want) != null;
+}
+
+test "an adopted window reports its share of the split" {
+    var buf: [1024]u8 = undefined;
+    var h: Harness = .{ .nvim = Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n" }, &buf) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    } };
+    defer h.deinit();
+    try h.nvim.uiAttach(40, 10, .{ .ext_multigrid = true });
+    h.chan_id = try askChannel(&h.nvim);
+    try h.nvim.flush();
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return x.wins[0] != 0 and x.kind(x.wins[0]) == .external;
+        }
+    }.f));
+
+    // a plain :vsplit: about half
+    h.notes.clearRetainingCapacity();
+    try h.input(":vsplit<CR>");
+    try testing.expect(try h.until(newOrdinary));
+    const plain = h.lastCurrent();
+    try adopt(&h.nvim, plain, 20, 9);
+    try h.nvim.flush();
+    h.want = plain;
+    try testing.expect(try h.until(wantShared));
+    const half = shareOf(&h, plain).?;
+    try testing.expect(half >= 450 and half <= 550);
+    try close(&h.nvim, plain);
+    try h.nvim.flush();
+
+    // sized as it opens, like nvim-tree's sidebar: 10 of 40 columns
+    h.notes.clearRetainingCapacity();
+    try h.input(":topleft vsplit | vertical resize 10<CR>");
+    try testing.expect(try h.until(newOrdinary));
+    const side = h.lastCurrent();
+    try testing.expect(side != plain);
+    try testing.expect(h.splitNote(side).?.split.before);
+    try adopt(&h.nvim, side, 20, 9);
+    try h.nvim.flush();
+    h.want = side;
+    try testing.expect(try h.until(wantShared));
+    try testing.expectEqual(@as(u16, 250), shareOf(&h, side).?);
 }
 
 /// Grid row `r` of window `win` starts with `want`.

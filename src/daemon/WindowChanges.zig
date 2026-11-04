@@ -75,6 +75,11 @@ pub fn noteSplit(self: *WindowChanges, gpa: Allocator, sp: windows.Split) !void 
     try self.splits.put(gpa, sp.win, sp);
 }
 
+/// How much of its split Neovim gave `win`, if it's still waiting for a pane.
+pub fn noteShare(self: *WindowChanges, share: windows.Share) void {
+    if (self.splits.getPtr(share.win)) |sp| sp.share = share.permille;
+}
+
 /// Where Neovim put `win`; beside the current window if it didn't say.
 pub fn splitOf(self: *const WindowChanges, win: i64) windows.Split {
     return self.splits.get(win) orelse .{ .win = win, .side_by_side = true, .before = false, .from = 0 };
@@ -111,6 +116,17 @@ test "split defaults to beside the current window" {
     try testing.expectEqual(@as(i64, 999), changes.splitOf(1000).from);
     changes.forgetSplit(1000);
     try testing.expectEqual(@as(i64, 0), changes.splitOf(1000).from);
+}
+
+test "a split keeps the share Neovim gave it" {
+    var changes: WindowChanges = .{};
+    defer changes.deinit(testing.allocator);
+    // no split noted: nothing to keep it on
+    changes.noteShare(.{ .win = 1000, .permille = 200 });
+    try testing.expectEqual(@as(u16, 0), changes.splitOf(1000).share);
+    try changes.noteSplit(testing.allocator, .{ .win = 1000, .side_by_side = true, .before = true, .from = 999 });
+    changes.noteShare(.{ .win = 1000, .permille = 200 });
+    try testing.expectEqual(@as(u16, 200), changes.splitOf(1000).share);
 }
 
 test "forgets windows Neovim no longer has" {

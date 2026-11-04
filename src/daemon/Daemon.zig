@@ -298,6 +298,7 @@ fn newPane(self: *Daemon, win: i64) !void {
         .anchor_id = @as([]const u8, &anchor),
         .direction = if (sp.side_by_side) "horizontal" else "vertical",
         .side = if (sp.before) "before" else "after",
+        .ratio = splitRatio(sp),
         .layout = .{ .block = .{
             .flavor = "com.superlogical.terminal.shell",
             .label = "neorex",
@@ -356,6 +357,7 @@ fn onNvim(self: *Daemon) !void {
                 .entered => |win| try self.onEnteredFloat(win),
                 .reopen => |win| if (self.panes.byWin(win) != null) try self.changes.markReopening(self.gpa, win),
                 .split => |sp| if (self.panes.byWin(sp.win) == null) try self.changes.noteSplit(self.gpa, sp),
+                .share => |sh| self.changes.noteShare(sh),
                 .title => |t| try self.titles.set(self.gpa, t),
                 .cmdheight => |rows| try self.onCmdheight(rows),
             };
@@ -486,21 +488,42 @@ fn waitingPane(self: *const Daemon) ?*Pane {
     return null;
 }
 
-/// A guess until the new pane says its size: half the pane it splits.
+/// A guess until the new pane says its size: its share of the pane it splits.
 fn newWindowSize(self: *const Daemon, win: i64) [2]u32 {
     const size = self.newPaneSize(win);
     return .{ size[0], @max(size[1] -| self.nvim.cmd_rows, 1) };
 }
 
-/// A guess at a new split's terminal size, cols x rows: half the pane it splits.
+/// A guess at a new split's terminal size, cols x rows: its share of the
+/// pane it splits.
 fn newPaneSize(self: *const Daemon, win: i64) [2]u32 {
     const sp = self.changes.splitOf(win);
     const p = self.splitFrom(sp) orelse return rex_default_size;
     const s = p.terminal_surface orelse return rex_default_size;
     const cols = @max(s.view.cols, 1);
     const rows = @max(s.view.rows, 2);
-    if (sp.side_by_side) return .{ @max(cols / 2, 1), rows };
-    return .{ cols, @max(rows / 2, 2) };
+    const share = newShare(sp);
+    if (sp.side_by_side) return .{ @max(scaled(cols, share), 1), rows };
+    return .{ cols, @max(scaled(rows, share), 2) };
+}
+
+/// The fraction of the pane it splits that a new window gets: what Neovim
+/// gave it, so a plugin's size (nvim-tree's width) carries over, else half.
+/// Kept clear of the edges so neither pane vanishes.
+fn newShare(sp: windows.Split) f64 {
+    if (sp.share == 0) return 0.5;
+    return std.math.clamp(@as(f64, @floatFromInt(sp.share)) / 1000, 0.05, 0.95);
+}
+
+/// Rex's `ratio` for a new split: the part before the border, which is the
+/// new pane only if it goes first.
+fn splitRatio(sp: windows.Split) f64 {
+    const share = newShare(sp);
+    return if (sp.before) share else 1 - share;
+}
+
+fn scaled(n: u32, f: f64) u32 {
+    return @intFromFloat(@round(@as(f64, @floatFromInt(n)) * f));
 }
 
 /// The pane a new window splits: its origin's, else the focused one.
