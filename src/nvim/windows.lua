@@ -122,6 +122,20 @@ function M.place_group(tops, row, col, w, h, cur)
       end
     end
   end
+  -- an fzf-lua picker lays itself out again from its size and position,
+  -- borders and preview included: absolute cells when over 1, else a
+  -- fraction of the screen, so a 1 becomes the fraction that rounds to it
+  local okf, FzfWin = pcall(require, 'fzf-lua.win')
+  local fzf = okf and type(FzfWin) == 'table' and FzfWin.__SELF and FzfWin.__SELF()
+  if fzf and fzf._o and fzf._o.winopts and (set[fzf.fzf_winid] or set[fzf.preview_winid]) then
+    local o = fzf._o.winopts
+    local function cells(v, room) return v == 1 and (v + 0.5) / math.max(room, 2) or v end
+    o.width, o.height = math.max(w, 2), math.max(h, 2)
+    o.row = cells(row, vim.o.lines - o.height)
+    o.col = cells(col, vim.o.columns - o.width)
+    fzf:redraw()
+    return true
+  end
   -- one float on its own grows by what its pane grew
   if #tops ~= 1 or not api.nvim_win_is_valid(tops[1]) then return false end
   local win = tops[1]
