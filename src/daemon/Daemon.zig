@@ -18,6 +18,7 @@ const FloatGroups = @import("../screen/FloatGroups.zig");
 const PaneView = @import("../screen/PaneView.zig");
 const Client = @import("../rex/Client.zig");
 const layout = @import("../rex/layout.zig");
+const LayoutTree = @import("../rex/LayoutTree.zig");
 const Loop = @import("Loop.zig");
 const Pane = @import("Pane.zig");
 const Panes = @import("Panes.zig");
@@ -43,6 +44,8 @@ rex: RexSession,
 nvim: NvimSession,
 changes: WindowChanges = .{},
 titles: Titles = .{},
+/// Rex's tiled layout of the window holding our panes, as its last view had it.
+rex_layout: LayoutTree = .{},
 /// Set by `stop`; `run` returns it.
 stopped: ?StopReason = null,
 
@@ -79,6 +82,7 @@ pub fn deinit(self: *Daemon) void {
     self.panes.deinit(self.gpa, self.io);
     self.grids.deinit(self.gpa);
     self.changes.deinit(self.gpa);
+    self.rex_layout.deinit(self.gpa);
     self.rex.deinit();
     self.* = undefined;
 }
@@ -587,6 +591,7 @@ fn readLayout(self: *Daemon, wins: []const std.json.Value) !void {
             ours = true;
         };
         if (!ours) continue;
+        try self.rex_layout.read(self.gpa, w);
         const id = Client.getStr(w, "window_id") orelse continue;
         if (id.len == 43) self.rex.window = id[0..43].*;
         self.titles.readWindow(self.gpa, &self.panes, &self.rex, w);

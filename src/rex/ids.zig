@@ -18,6 +18,14 @@ pub fn layer(id: []const u8) error{BadRexLayer}!Layer {
     return id[0..42].*;
 }
 
+/// `split:` and a UUID.
+pub const Split = [42]u8;
+
+pub fn split(id: []const u8) error{BadRexSplit}!Split {
+    if (id.len != 42) return error.BadRexSplit;
+    return id[0..42].*;
+}
+
 pub fn sameBlock(a: Block, b: Block) bool {
     return std.mem.eql(u8, &a, &b);
 }

@@ -96,6 +96,7 @@ test {
     _ = @import("rex/Session.zig");
     _ = @import("rex/layout.zig");
     _ = @import("rex/ids.zig");
+    _ = @import("rex/LayoutTree.zig");
     _ = @import("debug/PaneHost.zig");
     _ = debug_keys;
     _ = debug_events;

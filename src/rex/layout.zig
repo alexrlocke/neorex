@@ -91,7 +91,7 @@ fn readFloating(gpa: Allocator, layer: Value, out: *std.ArrayList(Placed)) Alloc
 // values
 
 /// `[x, y, w, h]`, from integers or floats.
-fn asRect(v: ?Value) ?Rect {
+pub fn asRect(v: ?Value) ?Rect {
     const items = switch (v orelse return null) {
         .array => |arr| arr.items,
         else => return null,
@@ -103,7 +103,7 @@ fn asRect(v: ?Value) ?Rect {
 }
 
 /// A JSON number as a float, whether it's written as an integer or not.
-fn asNumber(v: Value) ?f64 {
+pub fn asNumber(v: Value) ?f64 {
     return switch (v) {
         .float => |f| f,
         .integer => |n| @floatFromInt(n),
