@@ -78,6 +78,9 @@ pub const Note = union(enum) {
     reopen: i64,
     /// A new window, and where Neovim put it.
     split: Split,
+    /// A new window has a fixed size ('winfixwidth' or 'winfixheight'), as
+    /// a sidebar or the quickfix list does; sent as it's adopted.
+    fixed: Fixed,
     /// The current window is now this float.
     float: i64,
     /// This float was just entered; sent before the redraw that shows it.
@@ -103,6 +106,17 @@ pub const Split = struct {
     before: bool,
     /// The window it was split from, or 0.
     from: i64,
+    /// A fixed-size window's size across the split, in cells; 0 for an
+    /// ordinary window, or until `fixed` says.
+    fixed_cells: u32 = 0,
+};
+
+/// A fixed-size window: it keeps its size, and opens at the edge of our
+/// panes like Neovim's :topleft.
+pub const Fixed = struct {
+    win: i64,
+    /// Columns beside, or rows above or below, statusline included.
+    cells: u32,
 };
 
 /// A notification from the Lua, or null for any other.
@@ -113,6 +127,8 @@ pub fn parseNote(method: []const u8, params: *msgpack.Decoder) !?Note {
         .reopen
     else if (std.mem.eql(u8, method, "neorex_split"))
         .split
+    else if (std.mem.eql(u8, method, "neorex_fixed"))
+        .fixed
     else if (std.mem.eql(u8, method, "neorex_float"))
         .float
     else if (std.mem.eql(u8, method, "neorex_entered"))
@@ -125,7 +141,7 @@ pub fn parseNote(method: []const u8, params: *msgpack.Decoder) !?Note {
         return null;
     const want: u32 = switch (tag) {
         .split => 4,
-        .title => 2,
+        .title, .fixed => 2,
         else => 1,
     };
     if (try rpc.expectArray(params) < want) return error.BadMessage;
@@ -138,6 +154,7 @@ pub fn parseNote(method: []const u8, params: *msgpack.Decoder) !?Note {
         .float => .{ .float = win },
         .entered => .{ .entered = win },
         .title => .{ .title = .{ .win = win, .name = try rpc.expectStr(params) } },
+        .fixed => .{ .fixed = .{ .win = win, .cells = std.math.cast(u32, try rpc.expectInt(params)) orelse return error.BadMessage } },
         .cmdheight => unreachable,
         .split => .{ .split = .{
             .win = win,
@@ -426,6 +443,84 @@ test "a window Neovim resizes itself snaps back to its pane's size" {
     // as :vertical resize does
     try luaThenSettle(&h, "vim.cmd('vertical resize 30')", "200");
     try testing.expectEqual(cols, gridWidth(&h, win));
+}
+
+fn fixedOf(h: *const Harness, win: i64) ?u32 {
+    for (h.notes.items) |n| if (n == .fixed and n.fixed.win == win) return n.fixed.cells;
+    return null;
+}
+
+fn newOrdinary(x: *Harness) bool {
+    const cur = x.lastCurrent();
+    return cur != 0 and x.kind(cur) == .ordinary;
+}
+
+fn wantExternal(x: *Harness) bool {
+    return x.kind(x.want) == .external;
+}
+
+/// Opens a window with `cmd`, adopts it, and returns it and what it
+/// reported as its fixed size. The note comes before the redraw that shows it
+/// external, so once it's external there's none to wait for.
+fn openAdopted(h: *Harness, cmd: []const u8) !struct { i64, ?u32 } {
+    h.notes.clearRetainingCapacity();
+    try h.input(cmd);
+    try testing.expect(try h.until(newOrdinary));
+    const win = h.lastCurrent();
+    try adopt(&h.nvim, win, 20, 9);
+    try h.nvim.flush();
+    h.want = win;
+    try testing.expect(try h.until(wantExternal));
+    return .{ win, fixedOf(h, win) };
+}
+
+fn closeAndWait(h: *Harness, win: i64) !void {
+    try close(&h.nvim, win);
+    try h.nvim.flush();
+    h.gone = win;
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return x.kind(x.gone) == null;
+        }
+    }.f));
+}
+
+test "fixed-size windows report their size" {
+    var buf: [1024]u8 = undefined;
+    var h: Harness = .{ .nvim = Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n" }, &buf) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    } };
+    defer h.deinit();
+    try h.nvim.uiAttach(40, 10, .{ .ext_multigrid = true });
+    h.chan_id = try askChannel(&h.nvim);
+    try h.nvim.flush();
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return x.wins[0] != 0 and x.kind(x.wins[0]) == .external;
+        }
+    }.f));
+
+    // a plain :vsplit isn't fixed
+    const plain = try openAdopted(&h, ":vsplit<CR>");
+    try testing.expectEqual(@as(?u32, null), plain[1]);
+    try closeAndWait(&h, plain[0]);
+
+    // nor is a sized split that isn't fixed
+    const sized = try openAdopted(&h, ":vertical 10split<CR>");
+    try testing.expectEqual(@as(?u32, null), sized[1]);
+    try closeAndWait(&h, sized[0]);
+
+    // like nvim-tree: at the left, 10 columns, fixed
+    const tree = try openAdopted(&h, ":topleft vsplit | vertical resize 10 | setlocal winfixwidth<CR>");
+    try testing.expectEqual(@as(?u32, 10), tree[1]);
+    try testing.expect(h.splitNote(tree[0]).?.split.before);
+    try closeAndWait(&h, tree[0]);
+
+    // like the quickfix list: below, 3 rows and Neovim's default statusline
+    const panel = try openAdopted(&h, ":botright 3split | setlocal winfixheight<CR>");
+    try testing.expectEqual(@as(?u32, 4), panel[1]);
+    try testing.expect(!h.splitNote(panel[0]).?.split.side_by_side);
 }
 
 fn titleIs(h: *const Harness, win: i64, want: []const u8) bool {

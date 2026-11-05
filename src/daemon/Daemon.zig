@@ -280,15 +280,20 @@ fn typedIntoUnfocusedPane(self: *const Daemon, pane: *const Pane, bytes: []const
 fn newPane(self: *Daemon, win: i64) !void {
     if (self.rex.conn == .closed) return; // no Rex: the window stays in Neovim
     const sp = self.changes.splitOf(win);
-    // beside the window it came from, else any pane Rex knows
+    const fixed = self.fixedPlace(sp);
+    // a fixed-size window at the edge of our panes; else beside the window it came
+    // from, else any pane Rex knows
     // a copy: appending below can move every pane
-    const anchor: Pane.RexBlock = blk: {
+    const anchor: [42]u8 = blk: {
+        if (fixed) |fx| break :blk fx.anchor;
         if (self.splitFrom(sp)) |f| if (f.rex_block) |b| break :blk b;
         for (self.panes.list.items) |q| if (q.layer == null) if (q.rex_block) |b| break :blk b;
         return; // no anchor yet: next flush
     };
     // starts at the guess, not Rex's default
-    const size = sizing.newPaneSize(self.splitFrom(sp), sp.side_by_side);
+    const size = if (fixed) |fx| sizing.fixedPaneSize(fx.fit, sp.side_by_side) else sizing.newPaneSize(self.splitFrom(sp), sp.side_by_side);
+    // half, unless it has a fixed size
+    const ratio = sizing.splitRatio(if (fixed) |fx| fx.fit.share else 0.5, sp.before);
     const pane = try self.panes.addForWindow(self.gpa, win);
     pane.awaiting_layout = true;
     const pane_id = pane.id;
@@ -301,6 +306,7 @@ fn newPane(self: *Daemon, win: i64) !void {
         .anchor_id = @as([]const u8, &anchor),
         .direction = if (sp.side_by_side) "horizontal" else "vertical",
         .side = if (sp.before) "before" else "after",
+        .ratio = ratio,
         .layout = .{ .block = .{
             .flavor = "com.superlogical.terminal.shell",
             .label = "neorex",
@@ -363,6 +369,7 @@ fn onNvim(self: *Daemon) !void {
                 .entered => |win| try self.onEnteredFloat(win),
                 .reopen => |win| if (self.panes.byWin(win) != null) try self.changes.markReopening(self.gpa, win),
                 .split => |sp| if (self.panes.byWin(sp.win) == null) try self.changes.noteSplit(self.gpa, sp),
+                .fixed => |fx| self.changes.noteFixed(fx),
                 .title => |t| try self.titles.set(self.gpa, t),
                 .cmdheight => |rows| try self.onCmdheight(rows),
             };
@@ -493,11 +500,43 @@ fn waitingPane(self: *const Daemon) ?*Pane {
     return null;
 }
 
-/// A guess until the new pane says its size: half the pane it splits.
+/// A guess until the new pane says its size: half the pane it splits, or a
+/// fixed-size window's size.
 fn newWindowSize(self: *const Daemon, win: i64) [2]u32 {
     const sp = self.changes.splitOf(win);
+    if (self.fixedPlace(sp)) |fx| {
+        const size = sizing.fixedPaneSize(fx.fit, sp.side_by_side);
+        return .{ size[0], @max(size[1] -| self.nvim.cmd_rows, 1) };
+    }
     return sizing.newWindowSize(self.splitFrom(sp), sp.side_by_side, self.nvim.cmd_rows);
 }
+
+/// Where fixed-size window `sp` opens: beside the smallest part of Rex's layout that
+/// holds all our tiled panes, like Neovim's :topleft at the editor's edge.
+/// Null for an ordinary split, or before Rex has shown us a layout or the
+/// editor's size.
+fn fixedPlace(self: *const Daemon, sp: windows.Split) ?struct { anchor: [42]u8, fit: sizing.Fixed } {
+    if (sp.fixed_cells == 0) return null;
+    const window = self.nvim.editor_size;
+    if (window[0] == 0 or window[1] == 0) return null;
+    const edge = self.rex_layout.edgeAround(OurTiledBlocks{ .panes = &self.panes }) orelse return null;
+    const id = self.rex_layout.idOf(edge) orelse return null;
+    if (id.len != 42) return null;
+    return .{
+        .anchor = id[0..42].*,
+        // the editor spans the Rex window, so its size is the window's
+        .fit = sizing.fixed(window, self.rex_layout.node(edge).rect, sp.fixed_cells, sp.side_by_side, self.nvim.cmd_rows),
+    };
+}
+
+/// Claims the blocks of our tiled panes, for `LayoutTree.edgeAround`.
+const OurTiledBlocks = struct {
+    panes: *const Panes,
+    pub fn isOurs(self: OurTiledBlocks, block: []const u8) bool {
+        const p = self.panes.byBlock(block) orelse return false;
+        return p.layer == null;
+    }
+};
 
 /// The pane a new window splits: its origin's, else the focused one.
 fn splitFrom(self: *const Daemon, sp: windows.Split) ?*Pane {

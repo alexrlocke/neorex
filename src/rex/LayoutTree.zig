@@ -141,7 +141,7 @@ pub fn idOf(self: *const LayoutTree, i: Index) ?[]const u8 {
 // lookups
 
 /// The smallest node holding every block that `ours.isOurs(block_id)`
-/// claims, or null if the tree holds none. A sidebar opens beside it, at the
+/// claims, or null if the tree holds none. A fixed-size window opens beside it, at the
 /// edge of our blocks, leaving Rex blocks that aren't ours outside.
 pub fn edgeAround(self: *const LayoutTree, ours: anytype) ?Index {
     var at = self.root orelse return null;

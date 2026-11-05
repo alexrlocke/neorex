@@ -96,9 +96,50 @@ api.nvim_create_autocmd('WinResized', {
   end,
 })
 
+-- the layout node directly holding `win`, a 'row' or 'col'
+local function parent_of(win)
+  local function find(node)
+    if node[1] == 'leaf' then return end
+    for _, c in ipairs(node[2]) do
+      if c[1] == 'leaf' and c[2] == win then return node end
+      local p = find(c)
+      if p then return p end
+    end
+  end
+  return find(vim.fn.winlayout(api.nvim_tabpage_get_number(api.nvim_win_get_tabpage(win))))
+end
+
+-- A fixed-size window's size across its split, in cells: columns beside, or rows
+-- (statusline included) above or below. Nil for an ordinary window, whose
+-- pane splits its origin's in half.
+--
+-- A heuristic. In Neovim a sidebar or panel opens at the editor's edge (:topleft,
+-- :botright, <C-w>H) and keeps its size, but every other window here is
+-- external, so the layout looks the same for :vsplit and :topleft vsplit and
+-- Neovim never says which it was. 'winfixwidth' / 'winfixheight' stand in for
+-- it, since sidebar plugins (nvim-tree, neo-tree, aerial) and the quickfix
+-- list set them. So a fixed window Neovim kept beside its origin still goes
+-- to the edge, and a sized split that isn't fixed (:vertical 30split, or
+-- :topleft vsplit typed by hand) gets half its origin's pane.
+local function fixed_cells(win)
+  local p = parent_of(win)
+  if not p then return end
+  if p[1] == 'row' then
+    if vim.wo[win].winfixwidth then return api.nvim_win_get_width(win) end
+  elseif vim.wo[win].winfixheight then
+    give_statusline(win)
+    return api.nvim_win_get_height(win) + (local_stl(win) ~= '' and 1 or 0)
+  end
+end
+
 --- Makes ordinary `win` external at `w` x `h`, giving its tab page an anchor first.
 function M.adopt(win, w, h)
   if not shown(win) or api.nvim_win_get_config(win).external then return end
+  -- before the anchor below can change the layout; by now any plugin that
+  -- opened the window has sized it. Sent ahead of the redraw that shows it
+  -- external, so the daemon has it when it makes the window's pane.
+  local cells = fixed_cells(win)
+  if cells then vim.rpcnotify(chan, 'neorex_fixed', win, cells) end
   local tab = api.nvim_win_get_tabpage(win)
   if not anchor_of(tab) then
     local buf = api.nvim_create_buf(false, true)
@@ -154,15 +195,10 @@ end
 
 -- the layout node holding `win`: 'row' or 'col', and whether `win` is first
 local function placement(win)
-  local function find(node)
-    if node[1] == 'leaf' then return end
-    for i, c in ipairs(node[2]) do
-      if c[1] == 'leaf' and c[2] == win then return node[1], i == 1 end
-      local dir, first = find(c)
-      if dir then return dir, first end
-    end
-  end
-  return find(vim.fn.winlayout(api.nvim_tabpage_get_number(api.nvim_win_get_tabpage(win))))
+  local p = parent_of(win)
+  if not p then return end
+  local c = p[2][1]
+  return p[1], c[1] == 'leaf' and c[2] == win
 end
 
 -- before it's adopted, so its pane opens where Neovim put the window

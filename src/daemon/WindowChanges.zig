@@ -16,7 +16,15 @@ closing: std.AutoArrayHashMapUnmanaged(i64, void) = .empty,
 /// for the new window instead of hanging up.
 reopening: std.AutoArrayHashMapUnmanaged(i64, void) = .empty,
 /// New windows without panes yet, and where Neovim put them.
-splits: std.AutoArrayHashMapUnmanaged(i64, windows.Split) = .empty,
+splits: std.AutoArrayHashMapUnmanaged(i64, PendingSplit) = .empty,
+
+const PendingSplit = struct {
+    split: windows.Split,
+    /// Whether Neovim has drawn the window yet. Some take a few flushes to
+    /// appear (neo-tree's), so a split is kept until its window has been
+    /// drawn and then gone.
+    drawn: bool = false,
+};
 
 pub fn deinit(self: *WindowChanges, gpa: Allocator) void {
     self.asked.deinit(gpa);
@@ -35,10 +43,16 @@ pub fn forgetGone(self: *WindowChanges, grids: *const Grids) void {
             if (grids.gridOf(set.keys()[j]) == null) set.swapRemoveAt(j);
         }
     }
+    // one that's never drawn is kept until the daemon ends; that's rare
     var j = self.splits.count();
     while (j > 0) {
         j -= 1;
-        if (grids.gridOf(self.splits.keys()[j]) == null) self.splits.swapRemoveAt(j);
+        const pending = &self.splits.values()[j];
+        if (grids.gridOf(self.splits.keys()[j]) != null) {
+            pending.drawn = true;
+        } else if (pending.drawn) {
+            self.splits.swapRemoveAt(j);
+        }
     }
 }
 
@@ -72,12 +86,17 @@ pub fn takeReopening(self: *WindowChanges, win: i64) bool {
 }
 
 pub fn noteSplit(self: *WindowChanges, gpa: Allocator, sp: windows.Split) !void {
-    try self.splits.put(gpa, sp.win, sp);
+    try self.splits.put(gpa, sp.win, .{ .split = sp });
+}
+
+/// `win` has a fixed size, if it's still waiting for a pane.
+pub fn noteFixed(self: *WindowChanges, fx: windows.Fixed) void {
+    if (self.splits.getPtr(fx.win)) |pending| pending.split.fixed_cells = fx.cells;
 }
 
 /// Where Neovim put `win`; beside the current window if it didn't say.
 pub fn splitOf(self: *const WindowChanges, win: i64) windows.Split {
-    return self.splits.get(win) orelse .{ .win = win, .side_by_side = true, .before = false, .from = 0 };
+    return if (self.splits.get(win)) |pending| pending.split else .{ .win = win, .side_by_side = true, .before = false, .from = 0 };
 }
 
 pub fn forgetSplit(self: *WindowChanges, win: i64) void {
@@ -113,6 +132,17 @@ test "split defaults to beside the current window" {
     try testing.expectEqual(@as(i64, 0), changes.splitOf(1000).from);
 }
 
+test "a split remembers its fixed size" {
+    var changes: WindowChanges = .{};
+    defer changes.deinit(testing.allocator);
+    // no split noted: nothing to keep it on
+    changes.noteFixed(.{ .win = 1000, .cells = 30 });
+    try testing.expectEqual(@as(u32, 0), changes.splitOf(1000).fixed_cells);
+    try changes.noteSplit(testing.allocator, .{ .win = 1000, .side_by_side = true, .before = true, .from = 999 });
+    changes.noteFixed(.{ .win = 1000, .cells = 30 });
+    try testing.expectEqual(@as(u32, 30), changes.splitOf(1000).fixed_cells);
+}
+
 test "forgets windows Neovim no longer has" {
     var grids: Grids = .{};
     defer grids.deinit(testing.allocator);
@@ -131,5 +161,23 @@ test "forgets windows Neovim no longer has" {
     try testing.expect(!try changes.shouldAdopt(testing.allocator, 1000));
     try testing.expect(changes.takeReopening(1000));
     try testing.expect(!changes.takeReopening(1001));
-    try testing.expectEqual(@as(usize, 1), changes.splits.count());
+}
+
+test "a split is kept until its window has been drawn and gone" {
+    var grids: Grids = .{};
+    defer grids.deinit(testing.allocator);
+    var changes: WindowChanges = .{};
+    defer changes.deinit(testing.allocator);
+    try changes.noteSplit(testing.allocator, .{ .win = 1000, .side_by_side = true, .before = true, .from = 0 });
+    // not drawn yet, as neo-tree's isn't on its first flush
+    changes.forgetGone(&grids);
+    try testing.expect(changes.splitOf(1000).before);
+    // drawn
+    try grids.wins.put(testing.allocator, 2, .{ .win = 1000, .kind = .ordinary });
+    changes.forgetGone(&grids);
+    try testing.expect(changes.splitOf(1000).before);
+    // gone
+    _ = grids.wins.swapRemove(2);
+    changes.forgetGone(&grids);
+    try testing.expect(!changes.splitOf(1000).before);
 }
