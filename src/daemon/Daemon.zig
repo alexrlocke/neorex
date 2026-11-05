@@ -24,7 +24,7 @@ const RexSession = @import("../rex/Session.zig");
 const NvimSession = @import("NvimSession.zig");
 const WindowChanges = @import("WindowChanges.zig");
 const Titles = @import("Titles.zig");
-const PaneSizes = @import("PaneSizes.zig");
+const PanePlaces = @import("PanePlaces.zig");
 const Surface = @import("Surface.zig");
 const pane_helper = @import("pane_helper.zig");
 
@@ -42,7 +42,7 @@ rex: RexSession,
 nvim: NvimSession,
 changes: WindowChanges = .{},
 titles: Titles = .{},
-pane_sizes: PaneSizes = .{},
+pane_places: PanePlaces = .{},
 /// Set by `stop`; `run` returns it.
 stopped: ?StopReason = null,
 
@@ -79,7 +79,7 @@ pub fn deinit(self: *Daemon) void {
     // before the panes hang up: the launching pane outlives us
     self.titles.restore(&self.panes, &self.rex);
     self.titles.deinit(self.gpa);
-    self.pane_sizes.deinit(self.gpa);
+    self.pane_places.deinit(self.gpa);
     self.panes.deinit(self.gpa, self.io);
     self.grids.deinit(self.gpa);
     self.changes.deinit(self.gpa);
@@ -279,11 +279,11 @@ fn typedIntoUnfocusedPane(self: *const Daemon, pane: *const Pane, bytes: []const
 
 fn newPane(self: *Daemon, win: i64) !void {
     if (self.rex.conn == .closed) return; // no Rex: the window stays in Neovim
-    const sp = self.changes.splitOf(win);
-    // beside the window it came from, else any pane Rex knows
+    const place = self.newPlace(win);
+    // beside the pane it goes by, else any pane Rex knows
     // a copy: appending below can move every pane
     const anchor: Pane.RexBlock = blk: {
-        if (self.splitFrom(sp)) |f| if (f.rex_block) |b| break :blk b;
+        if (place.by) |f| if (f.rex_block) |b| break :blk b;
         for (self.panes.list.items) |q| if (q.layer == null) if (q.rex_block) |b| break :blk b;
         return; // no anchor yet: next flush
     };
@@ -299,9 +299,9 @@ fn newPane(self: *Daemon, win: i64) !void {
     try self.rex.request(.{ .new_split = pane_id }, "session.new_split", .{
         .session_id = self.rex.session_id,
         .anchor_id = @as([]const u8, &anchor),
-        .direction = if (sp.side_by_side) "horizontal" else "vertical",
-        .side = if (sp.before) "before" else "after",
-        .ratio = self.splitRatio(win, sp),
+        .direction = if (place.side_by_side) "horizontal" else "vertical",
+        .side = if (place.before) "before" else "after",
+        .ratio = place.ratio(),
         .layout = .{ .block = .{
             .flavor = "com.superlogical.terminal.shell",
             .label = "neorex",
@@ -361,7 +361,7 @@ fn onNvim(self: *Daemon) !void {
                 .reopen => |win| if (self.panes.byWin(win) != null) try self.changes.markReopening(self.gpa, win),
                 .split => |sp| if (self.panes.byWin(sp.win) == null) try self.changes.noteSplit(self.gpa, sp),
                 .title => |t| try self.titles.set(self.gpa, t),
-                .kind => |k| try self.pane_sizes.setKind(self.gpa, k),
+                .kind => |k| try self.pane_places.setKind(self.gpa, k),
                 .cmdheight => |rows| try self.onCmdheight(rows),
             };
         },
@@ -448,7 +448,7 @@ fn reconcile(self: *Daemon) !void {
         const win = p.neovim_window_handle orelse continue;
         if (self.grids.gridOf(win) != null) continue;
         self.titles.forget(self.gpa, win);
-        self.pane_sizes.forget(self.gpa, win);
+        self.pane_places.forget(self.gpa, win);
         if (self.changes.takeReopening(win)) {
             p.neovim_window_handle = null;
             continue;
@@ -501,33 +501,73 @@ fn newWindowSize(self: *const Daemon, win: i64) [2]u32 {
 /// A guess at a new split's terminal size, cols x rows: its share of the
 /// pane it splits.
 fn newPaneSize(self: *const Daemon, win: i64) [2]u32 {
-    const sp = self.changes.splitOf(win);
-    const p = self.splitFrom(sp) orelse return rex_default_size;
+    const place = self.newPlace(win);
+    const p = place.by orelse return rex_default_size;
     const s = p.terminal_surface orelse return rex_default_size;
     const cols = @max(s.view.cols, 1);
     const rows = @max(s.view.rows, 2);
-    const share = self.newShare(win, sp) orelse 0.5;
-    if (sp.side_by_side) return .{ @max(scaled(cols, share), 1), rows };
+    const share = place.share orelse 0.5;
+    if (place.side_by_side) return .{ @max(scaled(cols, share), 1), rows };
     return .{ cols, @max(scaled(rows, share), 2) };
 }
 
-/// The part of the pane it splits that a new tool window gets: the share
-/// of the window Rex last gave its kind, over that pane's share. Null for
-/// half. Kept clear of the edges so neither pane vanishes.
-fn newShare(self: *const Daemon, win: i64, sp: windows.Split) ?f64 {
-    const want = self.pane_sizes.sizeFor(win) orelse return null;
-    const p = self.splitFrom(sp) orelse return null;
-    const r = p.rect orelse return null;
-    const have, const got = if (sp.side_by_side) .{ r[2], want[0] } else .{ r[3], want[1] };
-    if (have <= 0) return null;
-    return std.math.clamp(got / have, 0.05, 0.95);
+/// Where a new window's pane goes: beside which pane, which way, and how
+/// much of it the new pane takes.
+const NewPlace = struct {
+    /// The pane it splits, if one's known.
+    by: ?*Pane,
+    side_by_side: bool,
+    before: bool,
+    /// The new pane's part of the split; null for Rex's even split.
+    share: ?f64,
+
+    /// Rex's `ratio`: the part before the border.
+    fn ratio(p: NewPlace) ?f64 {
+        const share = p.share orelse return null;
+        return if (p.before) share else 1 - share;
+    }
+};
+
+/// A tool window goes beside the tool pane its kind last sat beside, as it
+/// was, if one's open. Otherwise where Neovim put it, at its kind's share
+/// of the window if it has one, else splitting evenly.
+fn newPlace(self: *const Daemon, win: i64) NewPlace {
+    const remembered = self.pane_places.placeFor(win);
+    if (remembered) |r| if (r.beside) |b| if (self.openToolPane(b.kind)) |by| return .{
+        .by = by,
+        .side_by_side = b.direction == .horizontal,
+        .before = b.before,
+        .share = clampShare(if (b.before) b.ratio else 1 - b.ratio),
+    };
+    const sp = self.changes.splitOf(win);
+    const by = self.splitFrom(sp);
+    return .{
+        .by = by,
+        .side_by_side = sp.side_by_side,
+        .before = sp.before,
+        .share = blk: {
+            const want = (remembered orelse break :blk null).size orelse break :blk null;
+            const r = (by orelse break :blk null).rect orelse break :blk null;
+            const have, const got = if (sp.side_by_side) .{ r[2], want[0] } else .{ r[3], want[1] };
+            if (have <= 0) break :blk null;
+            break :blk clampShare(got / have);
+        },
+    };
 }
 
-/// Rex's `ratio` for a new split, the part before the border, or null to
-/// leave it to Rex.
-fn splitRatio(self: *const Daemon, win: i64, sp: windows.Split) ?f64 {
-    const share = self.newShare(win, sp) orelse return null;
-    return if (sp.before) share else 1 - share;
+/// Kept clear of the edges so neither pane vanishes.
+fn clampShare(share: f64) f64 {
+    return std.math.clamp(share, 0.05, 0.95);
+}
+
+/// An open tool pane of kind `kind`.
+fn openToolPane(self: *const Daemon, kind: []const u8) ?*Pane {
+    for (self.panes.list.items) |*p| {
+        if (p.layer != null or p.closing != null or p.rex_block == null) continue;
+        const k = self.pane_places.kindOf(p.neovim_window_handle orelse continue) orelse continue;
+        if (std.mem.eql(u8, k, kind)) return p;
+    }
+    return null;
 }
 
 fn scaled(n: u32, f: f64) u32 {
@@ -607,30 +647,51 @@ fn onRexFocus(self: *Daemon, block: []const u8) !void {
 }
 
 /// A newer view: where our panes sit, so the editor and floats fit, and
-/// tool windows' next panes open at the size they have now.
+/// tool windows' next panes open where they are now.
 fn onLayout(self: *Daemon, wins: []const std.json.Value) !void {
-    self.readLayout(wins);
-    try self.rememberSizes();
+    if (self.readLayout(wins)) |layout| try self.rememberPlaces(layout);
     if (self.focusedPane()) |f| try self.nvim.fitUiTo(f);
     try self.nvim.client.flush();
     try self.draw();
 }
 
-/// Keeps the share of the window Rex gave each tool window's pane, for the
-/// next of its kind. Not while one fills the window, as the only pane or
-/// zoomed: that's not a size anyone chose for it.
-fn rememberSizes(self: *Daemon) !void {
+/// Keeps where Rex put each tool window's pane in `layout`, for the next of
+/// its kind: the tool pane it's directly beside, else its share of the
+/// window. Not while it fills the window, as the only pane or zoomed: no
+/// one chose that. Nor once the tool pane it was beside has closed: Rex
+/// gave it that pane's room, which says nothing about where it goes.
+fn rememberPlaces(self: *Daemon, layout: std.json.Value) !void {
+    var buf: [64]PanePlaces.Leaf = undefined;
+    const leaves = PanePlaces.leaves(layout, &buf);
     for (self.panes.list.items) |*p| {
         if (p.layer != null or p.closing != null) continue;
         const win = p.neovim_window_handle orelse continue;
-        const r = p.rect orelse continue;
-        if (r[2] >= 1 and r[3] >= 1) continue;
-        try self.pane_sizes.record(self.gpa, win, r[2], r[3]);
+        const kind = self.pane_places.kindOf(win) orelse continue;
+        const block: []const u8 = if (p.rex_block) |*b| b else continue;
+        const leaf = for (leaves) |l| {
+            if (std.mem.eql(u8, l.block, block)) break l;
+        } else continue;
+        const split = leaf.split orelse continue;
+        const beside: ?[]const u8 = blk: {
+            const sib = self.panes.byBlock(split.sibling orelse break :blk null) orelse break :blk null;
+            const k = self.pane_places.kindOf(sib.neovim_window_handle orelse break :blk null) orelse break :blk null;
+            break :blk if (std.mem.eql(u8, k, kind)) null else k;
+        };
+        if (beside) |k| {
+            try self.pane_places.recordBeside(self.gpa, win, .{ .kind = k, .direction = split.direction, .before = split.before, .ratio = split.ratio });
+        } else if (self.pane_places.placeFor(win)) |had| if (had.beside) |b| {
+            if (self.openToolPane(b.kind) == null) continue;
+            // moved away from it
+            try self.pane_places.recordBeside(self.gpa, win, null);
+        };
+        try self.pane_places.recordSize(self.gpa, win, leaf.rect[2], leaf.rect[3]);
     }
 }
 
 /// Remembers which Rex window holds our panes, and where each sits in it.
-fn readLayout(self: *Daemon, wins: []const std.json.Value) void {
+/// Returns that window's tiled layout.
+fn readLayout(self: *Daemon, wins: []const std.json.Value) ?std.json.Value {
+    var ours: ?std.json.Value = null;
     for (wins) |w| {
         const layers = Client.get(w, "layers") orelse continue;
         if (layers != .array) continue;
@@ -640,13 +701,18 @@ fn readLayout(self: *Daemon, wins: []const std.json.Value) void {
                 self.readLayerBounds(layer);
                 continue;
             }
-            if (Client.get(layer, "layout")) |l| found = self.readRects(l) or found;
+            const l = Client.get(layer, "layout") orelse continue;
+            if (self.readRects(l)) {
+                found = true;
+                ours = l;
+            }
         }
         if (!found) continue;
         const id = Client.getStr(w, "window_id") orelse continue;
         if (id.len == 43) self.rex.window = id[0..43].*;
         self.titles.readWindow(self.gpa, &self.panes, &self.rex, w);
     }
+    return ours;
 }
 
 /// A floating layer of ours somewhere else: the user moved it, so its
