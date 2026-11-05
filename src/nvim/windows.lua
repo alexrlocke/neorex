@@ -81,9 +81,30 @@ local function refit()
   end
 end
 
+-- window -> the kind last sent for it: its buffer's filetype if it's a tool
+-- window (nvim-tree, help, quickfix), '' for a file. Rex remembers the size
+-- the user gives a tool window's pane, and opens the next one of its kind at it.
+local kinds = {}
+
+local function kind_of(win)
+  local buf = api.nvim_win_get_buf(win)
+  if vim.bo[buf].buftype == '' then return '' end
+  return vim.bo[buf].filetype
+end
+
+local function report_kind(win)
+  local k = kind_of(win)
+  if kinds[win] == k then return end
+  kinds[win] = k
+  vim.rpcnotify(chan, 'neorex_kind', win, k)
+end
+
 --- Makes ordinary `win` external at `w` x `h`, giving its tab page an anchor first.
 function M.adopt(win, w, h)
   if not shown(win) or api.nvim_win_get_config(win).external then return end
+  -- ahead of the redraw that shows it external, so the daemon knows its
+  -- kind when it makes the window's pane
+  report_kind(win)
   local tab = api.nvim_win_get_tabpage(win)
   if not anchor_of(tab) then
     local buf = api.nvim_create_buf(false, true)
@@ -188,10 +209,13 @@ local function report_titles()
         titles[win] = t
         vim.rpcnotify(chan, 'neorex_title', win, t)
       end
+      report_kind(win)
     end
   end
-  for win in pairs(titles) do
-    if not api.nvim_win_is_valid(win) then titles[win] = nil end
+  for _, t in ipairs({ titles, kinds }) do
+    for win in pairs(t) do
+      if not api.nvim_win_is_valid(win) then t[win] = nil end
+    end
   end
 end
 
@@ -204,7 +228,7 @@ local function schedule_titles()
     report_titles()
   end)
 end
-api.nvim_create_autocmd({ 'BufWinEnter', 'BufEnter', 'BufFilePost', 'BufWritePost', 'WinNew' }, {
+api.nvim_create_autocmd({ 'BufWinEnter', 'BufEnter', 'BufFilePost', 'BufWritePost', 'WinNew', 'FileType' }, {
   group = group,
   callback = schedule_titles,
 })

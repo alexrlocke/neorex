@@ -24,6 +24,7 @@ const RexSession = @import("../rex/Session.zig");
 const NvimSession = @import("NvimSession.zig");
 const WindowChanges = @import("WindowChanges.zig");
 const Titles = @import("Titles.zig");
+const PaneSizes = @import("PaneSizes.zig");
 const Surface = @import("Surface.zig");
 const pane_helper = @import("pane_helper.zig");
 
@@ -41,6 +42,7 @@ rex: RexSession,
 nvim: NvimSession,
 changes: WindowChanges = .{},
 titles: Titles = .{},
+pane_sizes: PaneSizes = .{},
 /// Set by `stop`; `run` returns it.
 stopped: ?StopReason = null,
 
@@ -77,6 +79,7 @@ pub fn deinit(self: *Daemon) void {
     // before the panes hang up: the launching pane outlives us
     self.titles.restore(&self.panes, &self.rex);
     self.titles.deinit(self.gpa);
+    self.pane_sizes.deinit(self.gpa);
     self.panes.deinit(self.gpa, self.io);
     self.grids.deinit(self.gpa);
     self.changes.deinit(self.gpa);
@@ -298,6 +301,7 @@ fn newPane(self: *Daemon, win: i64) !void {
         .anchor_id = @as([]const u8, &anchor),
         .direction = if (sp.side_by_side) "horizontal" else "vertical",
         .side = if (sp.before) "before" else "after",
+        .ratio = self.splitRatio(win, sp),
         .layout = .{ .block = .{
             .flavor = "com.superlogical.terminal.shell",
             .label = "neorex",
@@ -357,6 +361,7 @@ fn onNvim(self: *Daemon) !void {
                 .reopen => |win| if (self.panes.byWin(win) != null) try self.changes.markReopening(self.gpa, win),
                 .split => |sp| if (self.panes.byWin(sp.win) == null) try self.changes.noteSplit(self.gpa, sp),
                 .title => |t| try self.titles.set(self.gpa, t),
+                .kind => |k| try self.pane_sizes.setKind(self.gpa, k),
                 .cmdheight => |rows| try self.onCmdheight(rows),
             };
         },
@@ -443,6 +448,7 @@ fn reconcile(self: *Daemon) !void {
         const win = p.neovim_window_handle orelse continue;
         if (self.grids.gridOf(win) != null) continue;
         self.titles.forget(self.gpa, win);
+        self.pane_sizes.forget(self.gpa, win);
         if (self.changes.takeReopening(win)) {
             p.neovim_window_handle = null;
             continue;
@@ -486,21 +492,46 @@ fn waitingPane(self: *const Daemon) ?*Pane {
     return null;
 }
 
-/// A guess until the new pane says its size: half the pane it splits.
+/// A guess until the new pane says its size: see `newPaneSize`.
 fn newWindowSize(self: *const Daemon, win: i64) [2]u32 {
     const size = self.newPaneSize(win);
     return .{ size[0], @max(size[1] -| self.nvim.cmd_rows, 1) };
 }
 
-/// A guess at a new split's terminal size, cols x rows: half the pane it splits.
+/// A guess at a new split's terminal size, cols x rows: its share of the
+/// pane it splits.
 fn newPaneSize(self: *const Daemon, win: i64) [2]u32 {
     const sp = self.changes.splitOf(win);
     const p = self.splitFrom(sp) orelse return rex_default_size;
     const s = p.terminal_surface orelse return rex_default_size;
     const cols = @max(s.view.cols, 1);
     const rows = @max(s.view.rows, 2);
-    if (sp.side_by_side) return .{ @max(cols / 2, 1), rows };
-    return .{ cols, @max(rows / 2, 2) };
+    const share = self.newShare(win, sp) orelse 0.5;
+    if (sp.side_by_side) return .{ @max(scaled(cols, share), 1), rows };
+    return .{ cols, @max(scaled(rows, share), 2) };
+}
+
+/// The part of the pane it splits that a new tool window gets: the share
+/// of the window Rex last gave its kind, over that pane's share. Null for
+/// half. Kept clear of the edges so neither pane vanishes.
+fn newShare(self: *const Daemon, win: i64, sp: windows.Split) ?f64 {
+    const want = self.pane_sizes.sizeFor(win) orelse return null;
+    const p = self.splitFrom(sp) orelse return null;
+    const r = p.rect orelse return null;
+    const have, const got = if (sp.side_by_side) .{ r[2], want[0] } else .{ r[3], want[1] };
+    if (have <= 0) return null;
+    return std.math.clamp(got / have, 0.05, 0.95);
+}
+
+/// Rex's `ratio` for a new split, the part before the border, or null to
+/// leave it to Rex.
+fn splitRatio(self: *const Daemon, win: i64, sp: windows.Split) ?f64 {
+    const share = self.newShare(win, sp) orelse return null;
+    return if (sp.before) share else 1 - share;
+}
+
+fn scaled(n: u32, f: f64) u32 {
+    return @intFromFloat(@round(@as(f64, @floatFromInt(n)) * f));
 }
 
 /// The pane a new window splits: its origin's, else the focused one.
@@ -575,12 +606,27 @@ fn onRexFocus(self: *Daemon, block: []const u8) !void {
     try self.draw();
 }
 
-/// A newer view: where our panes sit, so the editor and floats fit.
+/// A newer view: where our panes sit, so the editor and floats fit, and
+/// tool windows' next panes open at the size they have now.
 fn onLayout(self: *Daemon, wins: []const std.json.Value) !void {
     self.readLayout(wins);
+    try self.rememberSizes();
     if (self.focusedPane()) |f| try self.nvim.fitUiTo(f);
     try self.nvim.client.flush();
     try self.draw();
+}
+
+/// Keeps the share of the window Rex gave each tool window's pane, for the
+/// next of its kind. Not while one fills the window, as the only pane or
+/// zoomed: that's not a size anyone chose for it.
+fn rememberSizes(self: *Daemon) !void {
+    for (self.panes.list.items) |*p| {
+        if (p.layer != null or p.closing != null) continue;
+        const win = p.neovim_window_handle orelse continue;
+        const r = p.rect orelse continue;
+        if (r[2] >= 1 and r[3] >= 1) continue;
+        try self.pane_sizes.record(self.gpa, win, r[2], r[3]);
+    }
 }
 
 /// Remembers which Rex window holds our panes, and where each sits in it.

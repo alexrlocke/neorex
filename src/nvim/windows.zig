@@ -84,12 +84,21 @@ pub const Note = union(enum) {
     entered: i64,
     /// The file name a window shows, for its pane's label.
     title: Title,
+    /// What kind of window it is, for the size its pane opens at.
+    kind: Kind,
     /// 'cmdheight': the rows each pane keeps for the command line.
     cmdheight: u32,
 };
 
 pub const Title = struct {
     win: i64,
+    /// Points into the message: valid until the next read.
+    name: []const u8,
+};
+
+pub const Kind = struct {
+    win: i64,
+    /// A tool window's filetype, such as `NvimTree`; empty for a file.
     /// Points into the message: valid until the next read.
     name: []const u8,
 };
@@ -119,13 +128,15 @@ pub fn parseNote(method: []const u8, params: *msgpack.Decoder) !?Note {
         .entered
     else if (std.mem.eql(u8, method, "neorex_title"))
         .title
+    else if (std.mem.eql(u8, method, "neorex_kind"))
+        .kind
     else if (std.mem.eql(u8, method, "neorex_cmdheight"))
         .cmdheight
     else
         return null;
     const want: u32 = switch (tag) {
         .split => 4,
-        .title => 2,
+        .title, .kind => 2,
         else => 1,
     };
     if (try rpc.expectArray(params) < want) return error.BadMessage;
@@ -138,6 +149,7 @@ pub fn parseNote(method: []const u8, params: *msgpack.Decoder) !?Note {
         .float => .{ .float = win },
         .entered => .{ .entered = win },
         .title => .{ .title = .{ .win = win, .name = try rpc.expectStr(params) } },
+        .kind => .{ .kind = .{ .win = win, .name = try rpc.expectStr(params) } },
         .cmdheight => unreachable,
         .split => .{ .split = .{
             .win = win,
@@ -171,6 +183,8 @@ const Harness = struct {
     notes: std.ArrayList(Note) = .empty,
     /// Each window's last title, copied: a note's points into the read buffer.
     titles: std.AutoArrayHashMapUnmanaged(i64, []u8) = .empty,
+    /// Each window's last kind, copied likewise.
+    kinds: std.AutoArrayHashMapUnmanaged(i64, []u8) = .empty,
     setup_id: u32 = 0,
     chan_id: u32 = 0,
     wins: [2]i64 = .{ 0, 0 },
@@ -183,6 +197,8 @@ const Harness = struct {
         h.notes.deinit(testing.allocator);
         for (h.titles.values()) |t| testing.allocator.free(t);
         h.titles.deinit(testing.allocator);
+        for (h.kinds.values()) |k| testing.allocator.free(k);
+        h.kinds.deinit(testing.allocator);
         h.nvim.deinit(testing.allocator);
     }
 
@@ -203,6 +219,10 @@ const Harness = struct {
                         .title => |t| {
                             const name = try gpa.dupe(u8, t.name);
                             if (try h.titles.fetchPut(gpa, t.win, name)) |old| gpa.free(old.value);
+                        },
+                        .kind => |k| {
+                            const name = try gpa.dupe(u8, k.name);
+                            if (try h.kinds.fetchPut(gpa, k.win, name)) |old| gpa.free(old.value);
                         },
                         else => try h.notes.append(gpa, note),
                     };
@@ -428,6 +448,42 @@ test "each window's title is its file name" {
     try testing.expect(titleIs(&h, first, "some file.txt"));
     // the anchor is never named
     try testing.expect(h.titles.get(anchor) == null);
+}
+
+fn kindIs(h: *const Harness, win: i64, want: []const u8) bool {
+    const k = h.kinds.get(win) orelse return false;
+    return std.mem.eql(u8, k, want);
+}
+
+test "a tool window's kind is its filetype; a file's is empty" {
+    var buf: [1024]u8 = undefined;
+    var h: Harness = .{ .nvim = Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n" }, &buf) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    } };
+    defer h.deinit();
+    try h.nvim.uiAttach(40, 10, .{ .ext_multigrid = true });
+    h.chan_id = try askChannel(&h.nvim);
+    try h.nvim.flush();
+
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return x.wins[0] != 0 and kindIs(x, x.wins[0], "");
+        }
+    }.f));
+    const first = h.wins[0];
+    // a file with a filetype is still a file
+    try h.input(":edit /tmp/neorex-kind.lua<CR>");
+    // a scratch buffer, as sidebars use, goes by its filetype once it has one
+    h.notes.clearRetainingCapacity();
+    try h.input(":vnew | setlocal buftype=nofile | set filetype=NvimTree<CR>");
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            const cur = x.lastCurrent();
+            return cur != 0 and kindIs(x, cur, "NvimTree");
+        }
+    }.f));
+    try testing.expect(kindIs(&h, first, ""));
 }
 
 test "each window shows a statusline inside its pane" {
