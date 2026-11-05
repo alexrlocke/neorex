@@ -17,6 +17,8 @@ const Grids = @import("../screen/Grids.zig");
 const FloatGroups = @import("../screen/FloatGroups.zig");
 const PaneView = @import("../screen/PaneView.zig");
 const Client = @import("../rex/Client.zig");
+const layout = @import("../rex/layout.zig");
+const LayoutTree = @import("../rex/LayoutTree.zig");
 const Loop = @import("Loop.zig");
 const Pane = @import("Pane.zig");
 const Panes = @import("Panes.zig");
@@ -26,6 +28,7 @@ const WindowChanges = @import("WindowChanges.zig");
 const Titles = @import("Titles.zig");
 const Surface = @import("Surface.zig");
 const pane_helper = @import("pane_helper.zig");
+const sizing = @import("sizing.zig");
 
 const Daemon = @This();
 
@@ -41,6 +44,8 @@ rex: RexSession,
 nvim: NvimSession,
 changes: WindowChanges = .{},
 titles: Titles = .{},
+/// Rex's tiled layout of the window holding our panes, as its last view had it.
+rex_layout: LayoutTree = .{},
 /// Set by `stop`; `run` returns it.
 stopped: ?StopReason = null,
 
@@ -66,9 +71,6 @@ const focus_out_delay_ms = 80;
 /// How long a new split waits for the app to size it before trusting its terminal's size.
 const layout_wait_ms = 1000;
 
-/// A new Rex terminal's size, cols x rows, until the app lays it out.
-const rex_default_size = [2]u32{ 80, 24 };
-
 /// About how many cells a Rex floating pane's frame takes, across and down.
 /// Only a first guess: once made, its floats fit whatever size it is.
 const layer_frame = [2]i32{ 3, 2 };
@@ -80,6 +82,7 @@ pub fn deinit(self: *Daemon) void {
     self.panes.deinit(self.gpa, self.io);
     self.grids.deinit(self.gpa);
     self.changes.deinit(self.gpa);
+    self.rex_layout.deinit(self.gpa);
     self.rex.deinit();
     self.* = undefined;
 }
@@ -186,7 +189,7 @@ fn accept(self: *Daemon, server: *net.Server) !void {
     try pane.registerWith(self.loop);
     if (pane.awaiting_layout) {
         const v = pane.terminal_surface.?.view;
-        if (v.cols != rex_default_size[0] or v.rows != rex_default_size[1]) {
+        if (v.cols != sizing.rex_default_size[0] or v.rows != sizing.rex_default_size[1]) {
             pane.awaiting_layout = false;
         } else try self.addTimer(.layout_timer, layout_wait_ms);
     }
@@ -277,15 +280,20 @@ fn typedIntoUnfocusedPane(self: *const Daemon, pane: *const Pane, bytes: []const
 fn newPane(self: *Daemon, win: i64) !void {
     if (self.rex.conn == .closed) return; // no Rex: the window stays in Neovim
     const sp = self.changes.splitOf(win);
-    // beside the window it came from, else any pane Rex knows
+    const fixed = self.fixedPlace(sp);
+    // a fixed-size window at the edge of our panes; else beside the window it came
+    // from, else any pane Rex knows
     // a copy: appending below can move every pane
-    const anchor: Pane.RexBlock = blk: {
+    const anchor: [42]u8 = blk: {
+        if (fixed) |fx| break :blk fx.anchor;
         if (self.splitFrom(sp)) |f| if (f.rex_block) |b| break :blk b;
         for (self.panes.list.items) |q| if (q.layer == null) if (q.rex_block) |b| break :blk b;
         return; // no anchor yet: next flush
     };
     // starts at the guess, not Rex's default
-    const size = self.newPaneSize(win);
+    const size = if (fixed) |fx| sizing.fixedPaneSize(fx.fit, sp.side_by_side) else sizing.newPaneSize(self.splitFrom(sp), sp.side_by_side);
+    // half, unless it has a fixed size
+    const ratio = sizing.splitRatio(if (fixed) |fx| fx.fit.share else 0.5, sp.before);
     const pane = try self.panes.addForWindow(self.gpa, win);
     pane.awaiting_layout = true;
     const pane_id = pane.id;
@@ -298,6 +306,7 @@ fn newPane(self: *Daemon, win: i64) !void {
         .anchor_id = @as([]const u8, &anchor),
         .direction = if (sp.side_by_side) "horizontal" else "vertical",
         .side = if (sp.before) "before" else "after",
+        .ratio = ratio,
         .layout = .{ .block = .{
             .flavor = "com.superlogical.terminal.shell",
             .label = "neorex",
@@ -322,11 +331,7 @@ fn paneGone(self: *Daemon, p: *Pane) !void {
         try self.nvim.client.flush();
         return;
     }
-    var others = false;
-    for (self.panes.list.items) |q| {
-        if (q.id != p.id and q.closing != .request_failed and q.layer == null) others = true;
-    }
-    if (!others) {
+    if (!self.otherTiledPanes(p.id)) {
         self.stop(.pane_gone);
         return;
     }
@@ -336,6 +341,14 @@ fn paneGone(self: *Daemon, p: *Pane) !void {
     try self.changes.markClosing(self.gpa, win);
     try windows.close(self.nvim.client, win);
     try self.nvim.client.flush();
+}
+
+/// Another pane than `id` shows, or will show, an ordinary window.
+fn otherTiledPanes(self: *const Daemon, id: u32) bool {
+    for (self.panes.list.items) |q| {
+        if (q.id != id and q.closing != .request_failed and q.layer == null) return true;
+    }
+    return false;
 }
 
 // Neovim
@@ -356,6 +369,8 @@ fn onNvim(self: *Daemon) !void {
                 .entered => |win| try self.onEnteredFloat(win),
                 .reopen => |win| if (self.panes.byWin(win) != null) try self.changes.markReopening(self.gpa, win),
                 .split => |sp| if (self.panes.byWin(sp.win) == null) try self.changes.noteSplit(self.gpa, sp),
+                .fixed => |fx| self.changes.noteFixed(fx),
+                .resize => |rz| try self.onResize(rz),
                 .title => |t| try self.titles.set(self.gpa, t),
                 .cmdheight => |rows| try self.onCmdheight(rows),
             };
@@ -376,7 +391,7 @@ fn onNvim(self: *Daemon) !void {
             if (r.err) |e| {
                 std.debug.print("neovim error: {s}\n", .{e});
             } else if (r.id == self.nvim.channel_req) {
-                const size = self.windowSize(self.panes.byId(startup_pane_id).?);
+                const size = sizing.windowSize(self.panes.byId(startup_pane_id).?, self.nvim.cmd_rows);
                 self.nvim.setup_req = try windows.setup(self.nvim.client, try windows.parseChannel(&result), size[0], size[1]);
                 try self.nvim.client.flush();
             } else if (r.id == self.nvim.setup_req) {
@@ -388,6 +403,33 @@ fn onNvim(self: *Daemon) !void {
             }
         },
     };
+}
+
+/// Neovim resized a window and put it back: move its pane's borders in Rex
+/// instead, one `resize_pane` for each way it changed. The new size comes
+/// back like any other, as Rex resizing the pane.
+fn onResize(self: *Daemon, rz: windows.Resize) !void {
+    const p = self.panes.byWin(rz.win) orelse return;
+    if (p.layer != null) return;
+    const block = p.rex_block orelse return;
+    // zoomed, the pane fills the window whatever its borders say
+    if (self.rex_layout.zoomed_block != null) return;
+    // the editor spans the Rex window, so its size is the window's
+    const window = self.nvim.editor_size;
+    for ([_]LayoutTree.Direction{ .horizontal, .vertical }, [_]i32{ rz.cols, rz.rows }, 0..) |dir, delta, axis| {
+        const b = self.rex_layout.border(&block, dir) orelse continue;
+        const n = self.rex_layout.node(b.split);
+        const across = sizing.scaled(window[axis], n.rect[2 + axis]);
+        const ratio = sizing.movedRatio(n.kind.split.ratio, delta, across, b.side == .before) orelse continue;
+        self.rex_layout.setRatio(b.split, ratio);
+        try self.rex.request(.resize_pane, "session.resize_pane", .{
+            .session_id = self.rex.session_id,
+            .direction = @tagName(dir),
+            .before_block_id = @as([]const u8, &b.before_block),
+            .after_block_id = @as([]const u8, &b.after_block),
+            .ratio = ratio,
+        });
+    }
 }
 
 /// 'cmdheight' changed: give each window the rows its pane no longer keeps
@@ -448,8 +490,11 @@ fn reconcile(self: *Daemon) !void {
             continue;
         }
         p.closing = .window_closed;
-        // hanging up closes the Rex pane only once its helper has connected
-        if (p.terminal_surface == null) if (p.rex_block) |*b| try self.rex.closeBlock(b);
+        // close the Rex pane ourselves: Rex can keep a pane open after its
+        // helper exits (as when neo-tree opens and closes quickly), showing
+        // "exited". Before Rex answers there's no block yet, and
+        // onSplitMade closes it.
+        if (p.rex_block) |*b| try self.rex.closeBlock(b);
         self.panes.remove(self.gpa, self.io, i);
     }
     if (self.panes.list.items.len == 0) {
@@ -461,7 +506,7 @@ fn reconcile(self: *Daemon) !void {
     for (self.grids.wins.values()) |w| switch (w.kind) {
         .ordinary => {
             if (!try self.changes.shouldAdopt(self.gpa, w.win)) continue;
-            const size = if (self.panes.byWin(w.win)) |p| self.windowSize(p) else self.newWindowSize(w.win);
+            const size = if (self.panes.byWin(w.win)) |p| sizing.windowSize(p, self.nvim.cmd_rows) else self.newWindowSize(w.win);
             try windows.adopt(self.nvim.client, w.win, size[0], size[1]);
         },
         .external => {
@@ -486,22 +531,43 @@ fn waitingPane(self: *const Daemon) ?*Pane {
     return null;
 }
 
-/// A guess until the new pane says its size: half the pane it splits.
+/// A guess until the new pane says its size: half the pane it splits, or a
+/// fixed-size window's size.
 fn newWindowSize(self: *const Daemon, win: i64) [2]u32 {
-    const size = self.newPaneSize(win);
-    return .{ size[0], @max(size[1] -| self.nvim.cmd_rows, 1) };
+    const sp = self.changes.splitOf(win);
+    if (self.fixedPlace(sp)) |fx| {
+        const size = sizing.fixedPaneSize(fx.fit, sp.side_by_side);
+        return .{ size[0], @max(size[1] -| self.nvim.cmd_rows, 1) };
+    }
+    return sizing.newWindowSize(self.splitFrom(sp), sp.side_by_side, self.nvim.cmd_rows);
 }
 
-/// A guess at a new split's terminal size, cols x rows: half the pane it splits.
-fn newPaneSize(self: *const Daemon, win: i64) [2]u32 {
-    const sp = self.changes.splitOf(win);
-    const p = self.splitFrom(sp) orelse return rex_default_size;
-    const s = p.terminal_surface orelse return rex_default_size;
-    const cols = @max(s.view.cols, 1);
-    const rows = @max(s.view.rows, 2);
-    if (sp.side_by_side) return .{ @max(cols / 2, 1), rows };
-    return .{ cols, @max(rows / 2, 2) };
+/// Where fixed-size window `sp` opens: beside the smallest part of Rex's layout that
+/// holds all our tiled panes, like Neovim's :topleft at the editor's edge.
+/// Null for an ordinary split, or before Rex has shown us a layout or the
+/// editor's size.
+fn fixedPlace(self: *const Daemon, sp: windows.Split) ?struct { anchor: [42]u8, fit: sizing.Fixed } {
+    if (sp.fixed_cells == 0) return null;
+    const window = self.nvim.editor_size;
+    if (window[0] == 0 or window[1] == 0) return null;
+    const edge = self.rex_layout.edgeAround(OurTiledBlocks{ .panes = &self.panes }) orelse return null;
+    const id = self.rex_layout.idOf(edge) orelse return null;
+    if (id.len != 42) return null;
+    return .{
+        .anchor = id[0..42].*,
+        // the editor spans the Rex window, so its size is the window's
+        .fit = sizing.fixed(window, self.rex_layout.node(edge).rect, sp.fixed_cells, sp.side_by_side, self.nvim.cmd_rows),
+    };
 }
+
+/// Claims the blocks of our tiled panes, for `LayoutTree.edgeAround`.
+const OurTiledBlocks = struct {
+    panes: *const Panes,
+    pub fn isOurs(self: OurTiledBlocks, block: []const u8) bool {
+        const p = self.panes.byBlock(block) orelse return false;
+        return p.layer == null;
+    }
+};
 
 /// The pane a new window splits: its origin's, else the focused one.
 fn splitFrom(self: *const Daemon, sp: windows.Split) ?*Pane {
@@ -577,26 +643,25 @@ fn onRexFocus(self: *Daemon, block: []const u8) !void {
 
 /// A newer view: where our panes sit, so the editor and floats fit.
 fn onLayout(self: *Daemon, wins: []const std.json.Value) !void {
-    self.readLayout(wins);
+    try self.readLayout(wins);
     if (self.focusedPane()) |f| try self.nvim.fitUiTo(f);
     try self.nvim.client.flush();
     try self.draw();
 }
 
 /// Remembers which Rex window holds our panes, and where each sits in it.
-fn readLayout(self: *Daemon, wins: []const std.json.Value) void {
+fn readLayout(self: *Daemon, wins: []const std.json.Value) !void {
     for (wins) |w| {
-        const layers = Client.get(w, "layers") orelse continue;
-        if (layers != .array) continue;
-        var found = false;
-        for (layers.array.items) |layer| {
-            if (!std.mem.eql(u8, Client.getStr(layer, "kind") orelse "", "tiled")) {
-                self.readLayerBounds(layer);
-                continue;
-            }
-            if (Client.get(layer, "layout")) |l| found = self.readRects(l) or found;
-        }
-        if (!found) continue;
+        var blocks = try layout.readWindow(self.gpa, w);
+        defer blocks.deinit(self.gpa);
+        for (blocks.floating.items) |f| self.onLayerBounds(f.block, f.rect);
+        var ours = false;
+        for (blocks.tiled.items) |t| if (self.panes.byBlock(t.block)) |p| {
+            p.rect = t.rect;
+            ours = true;
+        };
+        if (!ours) continue;
+        try self.rex_layout.read(self.gpa, w);
         const id = Client.getStr(w, "window_id") orelse continue;
         if (id.len == 43) self.rex.window = id[0..43].*;
         self.titles.readWindow(self.gpa, &self.panes, &self.rex, w);
@@ -605,48 +670,12 @@ fn readLayout(self: *Daemon, wins: []const std.json.Value) void {
 
 /// A floating layer of ours somewhere else: the user moved it, so its
 /// floats follow.
-fn readLayerBounds(self: *Daemon, layer: std.json.Value) void {
-    const bounds = rect4(Client.get(layer, "bounds")) orelse return;
-    const blocks = Client.get(layer, "blocks") orelse return;
-    if (blocks != .array or blocks.array.items.len == 0) return;
-    const p = self.panes.byBlock(Client.getStr(blocks.array.items[0], "block_id") orelse return) orelse return;
+fn onLayerBounds(self: *Daemon, block: []const u8, bounds: layout.Rect) void {
+    const p = self.panes.byBlock(block) orelse return;
     const l = if (p.layer) |*l| l else return;
     if (self.sameBounds(bounds, l.bounds)) return;
     l.bounds = bounds;
     _ = self.followLayer(p) catch {};
-}
-
-/// Finds our panes' blocks under layout node `node` and keeps their rects.
-fn readRects(self: *Daemon, node: std.json.Value) bool {
-    var found = false;
-    switch (node) {
-        .object => |o| {
-            if (Client.str(o.get("block_id"))) |b| if (self.panes.byBlock(b)) |p| if (rect4(o.get("rect"))) |r| {
-                p.rect = r;
-                found = true;
-            };
-            var it = o.iterator();
-            while (it.next()) |e| found = self.readRects(e.value_ptr.*) or found;
-        },
-        .array => |a| for (a.items) |x| {
-            found = self.readRects(x) or found;
-        },
-        else => {},
-    }
-    return found;
-}
-
-/// `[x, y, w, h]` as fractions.
-fn rect4(v: ?std.json.Value) ?[4]f64 {
-    const a = v orelse return null;
-    if (a != .array or a.array.items.len != 4) return null;
-    var out: [4]f64 = undefined;
-    for (a.array.items, &out) |x, *o| o.* = switch (x) {
-        .float => |f| f,
-        .integer => |n| @floatFromInt(n),
-        else => return null,
-    };
-    return out;
 }
 
 // floating panes
@@ -853,9 +882,4 @@ fn focusedPane(self: *const Daemon) ?*Pane {
 fn gridOfPane(self: *const Daemon, pane: *const Pane) ?u32 {
     const win = pane.neovim_window_handle orelse return null;
     return self.grids.gridOf(win);
-}
-
-/// No terminal yet: the smallest window, as Neovim allows.
-fn windowSize(self: *const Daemon, p: *const Pane) [2]u32 {
-    return if (p.terminal_surface) |s| s.windowSize(self.nvim.cmd_rows) else .{ 1, 1 };
 }

@@ -81,9 +81,77 @@ local function refit()
   end
 end
 
+-- Neovim resized an external window itself (:resize, <C-w>>, a plugin
+-- setting its width). Rex owns the layout, so this is only a request: put the
+-- window back to its pane's size, and tell the daemon how many columns and
+-- rows Neovim wanted it to grow by, so Rex can move the pane's border. Rex's
+-- answer comes back as a new pane size, through M.size. Our own resizes
+-- already match `sizes`, so they change nothing here and nothing loops.
+api.nvim_create_autocmd('WinResized', {
+  group = group,
+  callback = function()
+    for _, win in ipairs(vim.v.event.windows) do
+      local s = sizes[win]
+      if s and api.nvim_win_is_valid(win) then
+        local dw = api.nvim_win_get_width(win) - s[1]
+        local dh = api.nvim_win_get_height(win) - text_height(win, s[2])
+        M.size(win, s[1], s[2])
+        if dw ~= 0 or dh ~= 0 then vim.rpcnotify(chan, 'neorex_resize', win, dw, dh) end
+      end
+    end
+  end,
+})
+
+-- <C-w>_ and <C-w>| fill the editor with one window; in neorex, Rex's own
+-- zoom does that, so these do nothing
+for _, lhs in ipairs({ '<C-w>_', '<C-w>|' }) do
+  vim.keymap.set('n', lhs, '<Nop>', { desc = 'neorex: use Rex to zoom a pane' })
+end
+
+-- the layout node directly holding `win`, a 'row' or 'col'
+local function parent_of(win)
+  local function find(node)
+    if node[1] == 'leaf' then return end
+    for _, c in ipairs(node[2]) do
+      if c[1] == 'leaf' and c[2] == win then return node end
+      local p = find(c)
+      if p then return p end
+    end
+  end
+  return find(vim.fn.winlayout(api.nvim_tabpage_get_number(api.nvim_win_get_tabpage(win))))
+end
+
+-- A fixed-size window's size across its split, in cells: columns beside, or rows
+-- (statusline included) above or below. Nil for an ordinary window, whose
+-- pane splits its origin's in half.
+--
+-- A heuristic. In Neovim a sidebar or panel opens at the editor's edge (:topleft,
+-- :botright, <C-w>H) and keeps its size, but every other window here is
+-- external, so the layout looks the same for :vsplit and :topleft vsplit and
+-- Neovim never says which it was. 'winfixwidth' / 'winfixheight' stand in for
+-- it, since sidebar plugins (nvim-tree, neo-tree, aerial) and the quickfix
+-- list set them. So a fixed window Neovim kept beside its origin still goes
+-- to the edge, and a sized split that isn't fixed (:vertical 30split, or
+-- :topleft vsplit typed by hand) gets half its origin's pane.
+local function fixed_cells(win)
+  local p = parent_of(win)
+  if not p then return end
+  if p[1] == 'row' then
+    if vim.wo[win].winfixwidth then return api.nvim_win_get_width(win) end
+  elseif vim.wo[win].winfixheight then
+    give_statusline(win)
+    return api.nvim_win_get_height(win) + (local_stl(win) ~= '' and 1 or 0)
+  end
+end
+
 --- Makes ordinary `win` external at `w` x `h`, giving its tab page an anchor first.
 function M.adopt(win, w, h)
   if not shown(win) or api.nvim_win_get_config(win).external then return end
+  -- before the anchor below can change the layout; by now any plugin that
+  -- opened the window has sized it. Sent ahead of the redraw that shows it
+  -- external, so the daemon has it when it makes the window's pane.
+  local cells = fixed_cells(win)
+  if cells then vim.rpcnotify(chan, 'neorex_fixed', win, cells) end
   local tab = api.nvim_win_get_tabpage(win)
   if not anchor_of(tab) then
     local buf = api.nvim_create_buf(false, true)
@@ -137,17 +205,37 @@ function M.place_group(tops, row, col, w, h, cur)
   return true
 end
 
+-- neo-tree counts external windows as floats, so it never opens a file in one
+-- or remembers one as the last window; here every window it should use is
+-- external. Tell it they're ordinary, now or when neo-tree first loads.
+local function teach_neo_tree(utils)
+  if type(utils) ~= 'table' or type(utils.is_floating) ~= 'function' then return end
+  local is_floating = utils.is_floating
+  utils.is_floating = function(win)
+    local ok, c = pcall(api.nvim_win_get_config, win or 0)
+    if ok and c.external then return false end
+    return is_floating(win)
+  end
+end
+if package.loaded['neo-tree.utils'] then
+  teach_neo_tree(package.loaded['neo-tree.utils'])
+else
+  package.preload['neo-tree.utils'] = function(name)
+    -- load the real module from the path, as if we weren't here
+    package.preload[name] = nil
+    package.loaded[name] = nil
+    local utils = require(name)
+    teach_neo_tree(utils)
+    return utils
+  end
+end
+
 -- the layout node holding `win`: 'row' or 'col', and whether `win` is first
 local function placement(win)
-  local function find(node)
-    if node[1] == 'leaf' then return end
-    for i, c in ipairs(node[2]) do
-      if c[1] == 'leaf' and c[2] == win then return node[1], i == 1 end
-      local dir, first = find(c)
-      if dir then return dir, first end
-    end
-  end
-  return find(vim.fn.winlayout(api.nvim_tabpage_get_number(api.nvim_win_get_tabpage(win))))
+  local p = parent_of(win)
+  if not p then return end
+  local c = p[2][1]
+  return p[1], c[1] == 'leaf' and c[2] == win
 end
 
 -- before it's adopted, so its pane opens where Neovim put the window
@@ -253,6 +341,13 @@ api.nvim_create_autocmd('WinEnter', {
     if api.nvim_win_get_config(win).relative ~= '' then vim.rpcnotify(chan, 'neorex_entered', win) end
     schedule_report()
   end,
+})
+
+-- a window showing a buffer for the first time starts with an empty local
+-- statusline, and no OptionSet says so: give it back before the redraw
+api.nvim_create_autocmd('BufWinEnter', {
+  group = group,
+  callback = refit,
 })
 
 -- a statusline came, went or changed: fit the windows to their panes again

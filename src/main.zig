@@ -86,6 +86,7 @@ test {
     _ = @import("daemon/WindowChanges.zig");
     _ = @import("daemon/Titles.zig");
     _ = @import("daemon/Surface.zig");
+    _ = @import("daemon/sizing.zig");
     _ = @import("daemon/Daemon.zig");
     _ = @import("term/modes.zig");
     _ = launch;
@@ -93,7 +94,9 @@ test {
     _ = @import("rex/WebSocket.zig");
     _ = @import("rex/Client.zig");
     _ = @import("rex/Session.zig");
+    _ = @import("rex/layout.zig");
     _ = @import("rex/ids.zig");
+    _ = @import("rex/LayoutTree.zig");
     _ = @import("debug/PaneHost.zig");
     _ = debug_keys;
     _ = debug_events;
