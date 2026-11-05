@@ -81,6 +81,21 @@ local function refit()
   end
 end
 
+-- Neovim resized an external window itself (:resize, <C-w>>, a plugin
+-- setting its width): put it back to its pane's size. Rex owns the layout,
+-- so the pane's size is the window's; left alone, the window leaves blank
+-- space in its pane or gets cut off until Rex next resizes the pane. Our own
+-- resizes already match `sizes`, so they change nothing here.
+api.nvim_create_autocmd('WinResized', {
+  group = group,
+  callback = function()
+    for _, win in ipairs(vim.v.event.windows) do
+      local s = sizes[win]
+      if s and api.nvim_win_is_valid(win) then M.size(win, s[1], s[2]) end
+    end
+  end,
+})
+
 --- Makes ordinary `win` external at `w` x `h`, giving its tab page an anchor first.
 function M.adopt(win, w, h)
   if not shown(win) or api.nvim_win_get_config(win).external then return end

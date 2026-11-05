@@ -379,6 +379,55 @@ fn gridHeight(h: *const Harness, win: i64) u32 {
     return g.height;
 }
 
+fn gridWidth(h: *const Harness, win: i64) u32 {
+    const g = h.grids.get(h.grids.gridOf(win) orelse return 0) orelse return 0;
+    return g.width;
+}
+
+/// Runs Lua `code` in Neovim, then waits until a note sent `ms` later arrives:
+/// by then anything the Lua scheduled has run and been drawn.
+fn luaThenSettle(h: *Harness, comptime code: []const u8, comptime ms: []const u8) !void {
+    try h.input(":lua " ++ code ++ "<CR>");
+    // 'cmdheight' notes are the harness's to read; 99 marks this one
+    try h.input(":lua vim.defer_fn(function() vim.rpcnotify(0, 'neorex_cmdheight', 99) end, " ++ ms ++ ")<CR>");
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return lastCmdheight(x) == 99;
+        }
+    }.f));
+    h.notes.clearRetainingCapacity();
+}
+
+test "a window Neovim resizes itself snaps back to its pane's size" {
+    var buf: [1024]u8 = undefined;
+    var h: Harness = .{ .nvim = Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n" }, &buf) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    } };
+    defer h.deinit();
+    try h.nvim.uiAttach(40, 10, .{ .ext_multigrid = true });
+    h.chan_id = try askChannel(&h.nvim);
+    try h.nvim.flush();
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return x.wins[0] != 0 and x.kind(x.wins[0]) == .external;
+        }
+    }.f));
+    const win = h.wins[0];
+    const cols = gridWidth(&h, win);
+    const rows = gridHeight(&h, win);
+    try testing.expect(cols > 20 and rows > 3);
+
+    // as a plugin widening or shrinking its window would
+    try luaThenSettle(&h, "vim.api.nvim_win_set_width(0, 20)", "200");
+    try testing.expectEqual(cols, gridWidth(&h, win));
+    try luaThenSettle(&h, "vim.api.nvim_win_set_height(0, 3)", "200");
+    try testing.expectEqual(rows, gridHeight(&h, win));
+    // as :vertical resize does
+    try luaThenSettle(&h, "vim.cmd('vertical resize 30')", "200");
+    try testing.expectEqual(cols, gridWidth(&h, win));
+}
+
 fn titleIs(h: *const Harness, win: i64, want: []const u8) bool {
     return if (h.titles.get(win)) |t| std.mem.eql(u8, t, want) else false;
 }
