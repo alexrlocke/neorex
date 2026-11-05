@@ -66,7 +66,18 @@ pub fn splitRatio(share: f64, before: bool) f64 {
     return if (before) share else 1 - share;
 }
 
-fn scaled(n: u32, f: f64) u32 {
+/// A split's new ratio when the border beside a pane moves so the pane grows
+/// by `delta` cells, or shrinks if it's negative. `across` is the split's size
+/// in cells that way, and `before` is whether the pane is on its before side.
+/// Kept clear of the edges, as `fixed` is; null if the border wouldn't move.
+pub fn movedRatio(ratio: f64, delta: i32, across: u32, before: bool) ?f64 {
+    if (delta == 0 or across == 0) return null;
+    const step = @as(f64, @floatFromInt(delta)) / @as(f64, @floatFromInt(across));
+    const moved = std.math.clamp(if (before) ratio + step else ratio - step, 0.05, 0.95);
+    return if (moved == ratio) null else moved;
+}
+
+pub fn scaled(n: u32, f: f64) u32 {
     return @intFromFloat(@round(@as(f64, @floatFromInt(n)) * f));
 }
 
@@ -145,4 +156,17 @@ test "a fixed-size window's share stays clear of the edges" {
 test "Rex's ratio is the part before the border" {
     try testing.expectEqual(@as(f64, 0.2), splitRatio(0.2, true));
     try testing.expectEqual(@as(f64, 0.8), splitRatio(0.2, false));
+}
+
+test "a border moves by the cells a pane grows" {
+    // a pane before the border grows: the before part takes more
+    try testing.expectEqual(@as(?f64, 0.6), movedRatio(0.5, 20, 200, true));
+    // after it: the before part gives the cells up
+    try testing.expectEqual(@as(?f64, 0.4), movedRatio(0.5, 20, 200, false));
+    try testing.expectEqual(@as(?f64, 0.4), movedRatio(0.5, -20, 200, true));
+    // never to an edge, and no move is no request
+    try testing.expectEqual(@as(?f64, 0.95), movedRatio(0.5, 500, 200, true));
+    try testing.expectEqual(@as(?f64, null), movedRatio(0.95, 10, 200, true));
+    try testing.expectEqual(@as(?f64, null), movedRatio(0.5, 0, 200, true));
+    try testing.expectEqual(@as(?f64, null), movedRatio(0.5, 10, 0, true));
 }

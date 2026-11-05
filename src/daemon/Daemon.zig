@@ -370,6 +370,7 @@ fn onNvim(self: *Daemon) !void {
                 .reopen => |win| if (self.panes.byWin(win) != null) try self.changes.markReopening(self.gpa, win),
                 .split => |sp| if (self.panes.byWin(sp.win) == null) try self.changes.noteSplit(self.gpa, sp),
                 .fixed => |fx| self.changes.noteFixed(fx),
+                .resize => |rz| try self.onResize(rz),
                 .title => |t| try self.titles.set(self.gpa, t),
                 .cmdheight => |rows| try self.onCmdheight(rows),
             };
@@ -402,6 +403,33 @@ fn onNvim(self: *Daemon) !void {
             }
         },
     };
+}
+
+/// Neovim resized a window and put it back: move its pane's borders in Rex
+/// instead, one `resize_pane` for each way it changed. The new size comes
+/// back like any other, as Rex resizing the pane.
+fn onResize(self: *Daemon, rz: windows.Resize) !void {
+    const p = self.panes.byWin(rz.win) orelse return;
+    if (p.layer != null) return;
+    const block = p.rex_block orelse return;
+    // zoomed, the pane fills the window whatever its borders say
+    if (self.rex_layout.zoomed_block != null) return;
+    // the editor spans the Rex window, so its size is the window's
+    const window = self.nvim.editor_size;
+    for ([_]LayoutTree.Direction{ .horizontal, .vertical }, [_]i32{ rz.cols, rz.rows }, 0..) |dir, delta, axis| {
+        const b = self.rex_layout.border(&block, dir) orelse continue;
+        const n = self.rex_layout.node(b.split);
+        const across = sizing.scaled(window[axis], n.rect[2 + axis]);
+        const ratio = sizing.movedRatio(n.kind.split.ratio, delta, across, b.side == .before) orelse continue;
+        self.rex_layout.setRatio(b.split, ratio);
+        try self.rex.request(.resize_pane, "session.resize_pane", .{
+            .session_id = self.rex.session_id,
+            .direction = @tagName(dir),
+            .before_block_id = @as([]const u8, &b.before_block),
+            .after_block_id = @as([]const u8, &b.after_block),
+            .ratio = ratio,
+        });
+    }
 }
 
 /// 'cmdheight' changed: give each window the rows its pane no longer keeps
@@ -462,8 +490,11 @@ fn reconcile(self: *Daemon) !void {
             continue;
         }
         p.closing = .window_closed;
-        // hanging up closes the Rex pane only once its helper has connected
-        if (p.terminal_surface == null) if (p.rex_block) |*b| try self.rex.closeBlock(b);
+        // close the Rex pane ourselves: Rex can keep a pane open after its
+        // helper exits (as when neo-tree opens and closes quickly), showing
+        // "exited". Before Rex answers there's no block yet, and
+        // onSplitMade closes it.
+        if (p.rex_block) |*b| try self.rex.closeBlock(b);
         self.panes.remove(self.gpa, self.io, i);
     }
     if (self.panes.list.items.len == 0) {

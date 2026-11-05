@@ -170,6 +170,15 @@ fn count(self: *const LayoutTree, i: Index, ours: anytype) usize {
     };
 }
 
+/// Sets split `i`'s ratio to one we asked Rex for, so another resize before
+/// the next view starts from it. The next view puts back whatever Rex chose.
+pub fn setRatio(self: *LayoutTree, i: Index, ratio: f64) void {
+    switch (self.nodes.items[i].kind) {
+        .split => |*sp| sp.ratio = ratio,
+        .block => {},
+    }
+}
+
 /// A border beside a block: the split whose ratio moves, and a block on each
 /// side of it, as `resize_pane` takes them.
 pub const Border = struct {
@@ -426,4 +435,14 @@ test "the border beside a block" {
         // not in the tree
         try testing.expectEqual(@as(?Border, null), t.border(blockId('7'), .horizontal));
     }
+}
+
+test "a ratio we asked for stands until the next view" {
+    var m: Mirror = try .init(row);
+    defer m.deinit();
+    const b = m.tree.border(blockId('1'), .horizontal).?;
+    m.tree.setRatio(b.split, 0.7);
+    try testing.expectEqual(@as(f64, 0.7), m.tree.node(b.split).kind.split.ratio);
+    // a block has no ratio to set
+    m.tree.setRatio(m.tree.node(b.split).kind.split.before, 0.1);
 }

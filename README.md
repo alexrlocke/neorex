@@ -21,7 +21,9 @@ AI has been used heavily in building neorex due to limits on my available time. 
 ## Requirements
 
 - macOS (it uses kqueue)
-- [Rex](https://www.superlogical.com/rex)
+- [Rex](https://www.superlogical.com/rex), with its setting to auto-balance
+  splits turned off. Otherwise Rex evens out every new split, so a sidebar
+  such as neo-tree opens at half the window instead of its own width.
 - A recent Neovim. It's developed against 0.13-dev; older versions may show
   no statuslines.
 - Zig 0.17 to build

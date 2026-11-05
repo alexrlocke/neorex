@@ -81,6 +81,8 @@ pub const Note = union(enum) {
     /// A new window has a fixed size ('winfixwidth' or 'winfixheight'), as
     /// a sidebar or the quickfix list does; sent as it's adopted.
     fixed: Fixed,
+    /// Neovim resized a window; it was put back, and wants its pane resized.
+    resize: Resize,
     /// The current window is now this float.
     float: i64,
     /// This float was just entered; sent before the redraw that shows it.
@@ -119,6 +121,14 @@ pub const Fixed = struct {
     cells: u32,
 };
 
+/// How much Neovim wanted a window to grow: columns and rows, negative to
+/// shrink.
+pub const Resize = struct {
+    win: i64,
+    cols: i32,
+    rows: i32,
+};
+
 /// A notification from the Lua, or null for any other.
 pub fn parseNote(method: []const u8, params: *msgpack.Decoder) !?Note {
     const tag: std.meta.Tag(Note) = if (std.mem.eql(u8, method, "neorex_win"))
@@ -129,6 +139,8 @@ pub fn parseNote(method: []const u8, params: *msgpack.Decoder) !?Note {
         .split
     else if (std.mem.eql(u8, method, "neorex_fixed"))
         .fixed
+    else if (std.mem.eql(u8, method, "neorex_resize"))
+        .resize
     else if (std.mem.eql(u8, method, "neorex_float"))
         .float
     else if (std.mem.eql(u8, method, "neorex_entered"))
@@ -141,6 +153,7 @@ pub fn parseNote(method: []const u8, params: *msgpack.Decoder) !?Note {
         return null;
     const want: u32 = switch (tag) {
         .split => 4,
+        .resize => 3,
         .title, .fixed => 2,
         else => 1,
     };
@@ -155,6 +168,11 @@ pub fn parseNote(method: []const u8, params: *msgpack.Decoder) !?Note {
         .entered => .{ .entered = win },
         .title => .{ .title = .{ .win = win, .name = try rpc.expectStr(params) } },
         .fixed => .{ .fixed = .{ .win = win, .cells = std.math.cast(u32, try rpc.expectInt(params)) orelse return error.BadMessage } },
+        .resize => .{ .resize = .{
+            .win = win,
+            .cols = std.math.cast(i32, try rpc.expectInt(params)) orelse return error.BadMessage,
+            .rows = std.math.cast(i32, try rpc.expectInt(params)) orelse return error.BadMessage,
+        } },
         .cmdheight => unreachable,
         .split => .{ .split = .{
             .win = win,
@@ -443,6 +461,68 @@ test "a window Neovim resizes itself snaps back to its pane's size" {
     // as :vertical resize does
     try luaThenSettle(&h, "vim.cmd('vertical resize 30')", "200");
     try testing.expectEqual(cols, gridWidth(&h, win));
+}
+
+fn resizeOf(h: *const Harness, win: i64) ?Resize {
+    for (h.notes.items) |n| if (n == .resize and n.resize.win == win) return n.resize;
+    return null;
+}
+
+test "a window Neovim resizes asks for its pane to be resized" {
+    var buf: [1024]u8 = undefined;
+    var h: Harness = .{ .nvim = Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n" }, &buf) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    } };
+    defer h.deinit();
+    try h.nvim.uiAttach(40, 10, .{ .ext_multigrid = true });
+    h.chan_id = try askChannel(&h.nvim);
+    try h.nvim.flush();
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return x.wins[0] != 0 and x.kind(x.wins[0]) == .external;
+        }
+    }.f));
+    const win = h.wins[0];
+    const cols: i32 = @intCast(gridWidth(&h, win));
+    const rows: i32 = @intCast(gridHeight(&h, win));
+
+    // narrower, as :vertical resize does: the pane is asked to shrink by the
+    // difference, and the window snaps back meanwhile
+    h.notes.clearRetainingCapacity();
+    try h.input(":vertical resize 30<CR>");
+    h.want = win;
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return resizeOf(x, x.want) != null;
+        }
+    }.f));
+    try testing.expectEqual(Resize{ .win = win, .cols = 30 - cols, .rows = 0 }, resizeOf(&h, win).?);
+    try testing.expectEqual(@as(u32, @intCast(cols)), gridWidth(&h, win));
+
+    // shorter, as a plugin setting its height would
+    h.notes.clearRetainingCapacity();
+    try h.input(":lua vim.api.nvim_win_set_height(0, 3)<CR>");
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return resizeOf(x, x.want) != null;
+        }
+    }.f));
+    // the grid has the statusline too; the text had a row less
+    try testing.expectEqual(Resize{ .win = win, .cols = 0, .rows = 3 - (rows - 1) }, resizeOf(&h, win).?);
+
+    // our own resize, and <C-w>_ / <C-w>| (Rex zooms instead), ask for nothing
+    try luaThenSettle(&h, "", "200");
+    try h.input(":lua neorex.size(vim.api.nvim_get_current_win(), 20, 5)<CR>");
+    try h.input("<C-w>_<C-w>|");
+    try h.input(":lua vim.defer_fn(function() vim.rpcnotify(0, 'neorex_cmdheight', 99) end, 200)<CR>");
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return lastCmdheight(x) == 99;
+        }
+    }.f));
+    try testing.expectEqual(@as(?Resize, null), resizeOf(&h, win));
+    try testing.expectEqual(@as(u32, 20), gridWidth(&h, win));
 }
 
 fn fixedOf(h: *const Harness, win: i64) ?u32 {

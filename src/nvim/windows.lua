@@ -82,19 +82,31 @@ local function refit()
 end
 
 -- Neovim resized an external window itself (:resize, <C-w>>, a plugin
--- setting its width): put it back to its pane's size. Rex owns the layout,
--- so the pane's size is the window's; left alone, the window leaves blank
--- space in its pane or gets cut off until Rex next resizes the pane. Our own
--- resizes already match `sizes`, so they change nothing here.
+-- setting its width). Rex owns the layout, so this is only a request: put the
+-- window back to its pane's size, and tell the daemon how many columns and
+-- rows Neovim wanted it to grow by, so Rex can move the pane's border. Rex's
+-- answer comes back as a new pane size, through M.size. Our own resizes
+-- already match `sizes`, so they change nothing here and nothing loops.
 api.nvim_create_autocmd('WinResized', {
   group = group,
   callback = function()
     for _, win in ipairs(vim.v.event.windows) do
       local s = sizes[win]
-      if s and api.nvim_win_is_valid(win) then M.size(win, s[1], s[2]) end
+      if s and api.nvim_win_is_valid(win) then
+        local dw = api.nvim_win_get_width(win) - s[1]
+        local dh = api.nvim_win_get_height(win) - text_height(win, s[2])
+        M.size(win, s[1], s[2])
+        if dw ~= 0 or dh ~= 0 then vim.rpcnotify(chan, 'neorex_resize', win, dw, dh) end
+      end
     end
   end,
 })
+
+-- <C-w>_ and <C-w>| fill the editor with one window; in neorex, Rex's own
+-- zoom does that, so these do nothing
+for _, lhs in ipairs({ '<C-w>_', '<C-w>|' }) do
+  vim.keymap.set('n', lhs, '<Nop>', { desc = 'neorex: use Rex to zoom a pane' })
+end
 
 -- the layout node directly holding `win`, a 'row' or 'col'
 local function parent_of(win)
@@ -191,6 +203,31 @@ function M.place_group(tops, row, col, w, h, cur)
     height = math.max(1, c.height + h - cur[4]),
   })
   return true
+end
+
+-- neo-tree counts external windows as floats, so it never opens a file in one
+-- or remembers one as the last window; here every window it should use is
+-- external. Tell it they're ordinary, now or when neo-tree first loads.
+local function teach_neo_tree(utils)
+  if type(utils) ~= 'table' or type(utils.is_floating) ~= 'function' then return end
+  local is_floating = utils.is_floating
+  utils.is_floating = function(win)
+    local ok, c = pcall(api.nvim_win_get_config, win or 0)
+    if ok and c.external then return false end
+    return is_floating(win)
+  end
+end
+if package.loaded['neo-tree.utils'] then
+  teach_neo_tree(package.loaded['neo-tree.utils'])
+else
+  package.preload['neo-tree.utils'] = function(name)
+    -- load the real module from the path, as if we weren't here
+    package.preload[name] = nil
+    package.loaded[name] = nil
+    local utils = require(name)
+    teach_neo_tree(utils)
+    return utils
+  end
 end
 
 -- the layout node holding `win`: 'row' or 'col', and whether `win` is first

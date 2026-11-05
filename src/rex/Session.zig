@@ -15,6 +15,7 @@ const Request = union(enum) {
     new_split: u32, // pane
     new_layer: u32, // pane
     focus_block,
+    resize_pane,
     view,
     disown_block,
     close_block,
@@ -200,7 +201,7 @@ pub fn onResponse(self: *Session, res: Client.Response) !?Update {
         .focus_block => try self.onFocusBlockResult(res.result),
         .attach => try self.onAttachResult(res.result),
         .set_window_label => self.onSetWindowLabelResult(res.result),
-        .disown_block, .close_block, .close_layer, .set_block_label => {},
+        .disown_block, .close_block, .close_layer, .set_block_label, .resize_pane => {},
     }
     return null;
 }
