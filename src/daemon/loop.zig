@@ -7,9 +7,7 @@ const fd_t = std.posix.fd_t;
 
 pub const Loop = switch (builtin.os.tag) {
     .macos => @import("loop/Kqueue.zig"),
-    // becomes @import("loop/Epoll.zig") once that exists: Zig loads every
-    // imported file, even in a branch it doesn't take
-    .linux => @compileError("the epoll loop isn't written yet"),
+    .linux => @import("loop/Epoll.zig"),
     else => @compileError("neorex runs on macOS and Linux"),
 };
 
