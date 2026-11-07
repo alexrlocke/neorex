@@ -7,6 +7,7 @@ const std = @import("std");
 const net = std.Io.net;
 const Nvim = @import("../nvim/Nvim.zig");
 const Client = @import("../rex/Client.zig");
+const rex_server = @import("../rex/server.zig");
 const Loop = @import("loop.zig").Loop;
 const Daemon = @import("Daemon.zig");
 const Pane = @import("Pane.zig");
@@ -41,8 +42,13 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, base: []const u8, nvim_args: []co
     const sock = try path(&sock_buf, base, ".sock");
     const nvim_sock = try path(&nvim_sock_buf, base, ".nvim.sock");
     const log = try path(&log_buf, base, ".log");
-    const rex_url = env("REX_SERVER") orelse return error.NotInRex;
     const session_id = env("REX_SESSION") orelse return error.NotInRex;
+    // before the ready byte, so the launcher reports a missing server
+    const rex_url = rex_server.url(gpa, io) catch |err| {
+        std.debug.print("neorex daemon: no Rex server: REX_SERVER is unset and `rex server status` gave no endpoint\n", .{});
+        return err;
+    };
+    defer gpa.free(rex_url);
     var exe_buf: [1024]u8 = undefined;
     const exe = exe_buf[0..try std.process.executablePath(io, &exe_buf)];
 

@@ -86,6 +86,7 @@ test {
     _ = @import("daemon/WindowChanges.zig");
     _ = @import("daemon/Titles.zig");
     _ = @import("daemon/Surface.zig");
+    _ = @import("rex/server.zig");
     _ = @import("daemon/sizing.zig");
     _ = @import("daemon/Daemon.zig");
     _ = @import("term/modes.zig");

@@ -5,6 +5,7 @@
 const std = @import("std");
 const Loop = @import("../daemon/loop.zig").Loop;
 const Client = @import("../rex/Client.zig");
+const rex_server = @import("../rex/server.zig");
 const PaneHost = @import("PaneHost.zig");
 const debug_panes = @import("panes.zig");
 
@@ -16,7 +17,8 @@ const token_panes = 3;
 pub fn run(gpa: std.mem.Allocator, io: std.Io, socket_path: []const u8) !void {
     // the pane starts elsewhere, so the path must work from any directory
     if (!std.fs.path.isAbsolute(socket_path)) return error.SocketPathNotAbsolute;
-    const server_url = std.mem.span(std.c.getenv("REX_SERVER") orelse return error.NoRexServer);
+    const server_url = try rex_server.url(gpa, io);
+    defer gpa.free(server_url);
     const session_id = std.mem.span(std.c.getenv("REX_SESSION") orelse return error.NoRexSession);
     const anchor_id: ?[]const u8 = if (std.c.getenv("REX_BLOCK")) |b| std.mem.span(b) else null;
     var exe_buf: [1024]u8 = undefined;
