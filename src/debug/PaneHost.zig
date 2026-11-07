@@ -33,8 +33,8 @@ const Pane = struct {
 const Source = enum(u1) { socket, tty };
 
 /// Restores every terminal and hangs up, so the helpers exit.
-pub fn deinit(self: *PaneHost, io: std.Io) void {
-    for (&self.panes) |*slot| if (slot.*) |*p| close(io, p, slot);
+pub fn deinit(self: *PaneHost, io: std.Io, loop: *const Loop) void {
+    for (&self.panes) |*slot| if (slot.*) |*p| close(io, loop, p, slot);
     self.* = undefined;
 }
 
@@ -44,7 +44,7 @@ pub fn owns(self: *const PaneHost, token: usize) bool {
 }
 
 /// Handles an event for one of this host's tokens.
-pub fn handle(self: *PaneHost, io: std.Io, token: usize) !void {
+pub fn handle(self: *PaneHost, io: std.Io, loop: *const Loop, token: usize) !void {
     const i = (token - self.base) / 2;
     const source: Source = @fromBackingInt(@intCast((token - self.base) % 2));
     const slot = &self.panes[i];
@@ -53,11 +53,11 @@ pub fn handle(self: *PaneHost, io: std.Io, token: usize) !void {
     switch (source) {
         .socket => if (!try onMessage(io, p)) {
             std.debug.print("pane {d}: helper gone\n", .{p.id});
-            close(io, p, slot);
+            close(io, loop, p, slot);
         },
         .tty => if (!try onInput(p)) {
             std.debug.print("pane {d}: closed with q\n", .{p.id});
-            close(io, p, slot);
+            close(io, loop, p, slot);
         },
     }
 }
@@ -122,8 +122,11 @@ fn printSize(p: *Pane) !void {
     try p.term.writer.print("size {d}x{d}\r\n", .{ ws.col, ws.row });
 }
 
-/// Restores the terminal and hangs up, so the helper exits.
-fn close(io: std.Io, p: *Pane, slot: *?Pane) void {
+/// Restores the terminal and hangs up, so the helper exits. A remove that
+/// fails means accept failed before adding that fd, so it's ignored.
+fn close(io: std.Io, loop: *const Loop, p: *Pane, slot: *?Pane) void {
+    loop.remove(p.stream.socket.handle) catch {};
+    loop.remove(p.term.fd) catch {};
     p.term.deinit();
     _ = std.c.close(p.term.fd);
     p.stream.close(io);

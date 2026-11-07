@@ -40,7 +40,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, socket_path: []const u8) !void {
 
     var out_bufs: PaneHost.OutBufs = undefined;
     var host: PaneHost = .{ .out_bufs = &out_bufs, .base = token_panes, .name = "debug-rex" };
-    defer host.deinit(io);
+    defer host.deinit(io, &loop);
 
     const attach_id = try rex.request(gpa, "session.attach", .{ .session_id = session_id });
     var split_id: ?u64 = null;
@@ -91,7 +91,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, socket_path: []const u8) !void {
                     },
                 };
             },
-            else => if (host.owns(e.token)) try host.handle(io, e.token),
+            else => if (host.owns(e.token)) try host.handle(io, &loop, e.token),
         };
         if (pending_accept) try host.accept(io, &loop, &server);
     }

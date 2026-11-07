@@ -45,7 +45,8 @@ pub fn addRead(self: *const Loop, fd: fd_t, token: usize) !void {
     try self.change(@intCast(fd), std.c.EVFILT.READ, std.c.EV.ADD, token);
 }
 
-/// Stops watching `fd`. Not needed before closing it.
+/// Stops watching `fd`. Call before closing it: on Linux, a copy of the
+/// fd held elsewhere keeps it registered.
 pub fn remove(self: *const Loop, fd: fd_t) !void {
     try self.change(@intCast(fd), std.c.EVFILT.READ, std.c.EV.DELETE, 0);
 }

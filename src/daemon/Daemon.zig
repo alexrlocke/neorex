@@ -326,7 +326,7 @@ fn paneGone(self: *Daemon, p: *Pane) !void {
     const i = self.panes.indexOf(p.id).?;
     if (p.layer) |l| {
         // closed in Rex: close its floats, which the plugin notices
-        self.panes.remove(self.gpa, self.io, i);
+        self.panes.remove(self.gpa, self.io, self.loop, i);
         for (l.group.topGrids()) |top| if (self.grids.winOn(top)) |w| try windows.close(self.nvim.client, w.win);
         try self.nvim.client.flush();
         return;
@@ -336,7 +336,7 @@ fn paneGone(self: *Daemon, p: *Pane) !void {
         return;
     }
     const maybe_win = p.neovim_window_handle;
-    self.panes.remove(self.gpa, self.io, i);
+    self.panes.remove(self.gpa, self.io, self.loop, i);
     const win = maybe_win orelse return;
     try self.changes.markClosing(self.gpa, win);
     try windows.close(self.nvim.client, win);
@@ -495,7 +495,7 @@ fn reconcile(self: *Daemon) !void {
         // "exited". Before Rex answers there's no block yet, and
         // onSplitMade closes it.
         if (p.rex_block) |*b| try self.rex.closeBlock(b);
-        self.panes.remove(self.gpa, self.io, i);
+        self.panes.remove(self.gpa, self.io, self.loop, i);
     }
     if (self.panes.list.items.len == 0) {
         self.stop(.pane_gone);
@@ -697,7 +697,7 @@ fn reconcileLayers(self: *Daemon) !void {
             // without an id Rex hasn't answered yet: the answer closes it
             if (l.id) |*id| try self.rex.closeLayer(id);
             if (p.closing == null) p.closing = .window_closed;
-            self.panes.remove(self.gpa, self.io, i);
+            self.panes.remove(self.gpa, self.io, self.loop, i);
             continue;
         };
         l.group = g.*;

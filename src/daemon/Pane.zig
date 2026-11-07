@@ -150,6 +150,15 @@ pub fn registerWith(self: *Pane, loop: *Loop) !void {
     try loop.addRead(surface.terminal.fd, self.token(.terminal));
 }
 
+/// Takes the helper and terminal fds back from the loop: the reverse of
+/// registerWith. Call before deinit closes them. A remove that fails means
+/// that fd was never added (registerWith failed partway), so it's ignored.
+pub fn unregisterFrom(self: *const Pane, loop: *const Loop) void {
+    const surface = self.terminal_surface orelse return;
+    loop.remove(surface.helper_socket.socket.handle) catch {};
+    loop.remove(surface.terminal.fd) catch {};
+}
+
 const testing = std.testing;
 const test_id = "block:01a17fb6-c5b4-7d9c-8e1e-9fd2a65e8a50";
 const test_block: RexBlock = test_id[0..42].*;

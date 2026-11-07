@@ -25,7 +25,7 @@ pub fn run(io: std.Io, socket_path: []const u8) !void {
 
     var out_bufs: PaneHost.OutBufs = undefined;
     var host: PaneHost = .{ .out_bufs = &out_bufs, .base = token_panes, .name = "debug-panes" };
-    defer host.deinit(io);
+    defer host.deinit(io, &loop);
 
     var events: [16]Loop.Event = undefined;
     while (true) {
@@ -36,7 +36,7 @@ pub fn run(io: std.Io, socket_path: []const u8) !void {
                 return;
             },
             token_server => pending_accept = true,
-            else => try host.handle(io, e.token),
+            else => try host.handle(io, &loop, e.token),
         };
         if (pending_accept) try host.accept(io, &loop, &server);
     }
