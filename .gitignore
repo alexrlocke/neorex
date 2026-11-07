@@ -9,3 +9,8 @@ zig-pkg/
 *.swp
 *.swo
 *~
+
+# nix / direnv
+.direnv/
+result
+result-*
