@@ -3,7 +3,7 @@
 //! terminal over as debug-panes does, and prints Rex's events. Ctrl+C quits.
 
 const std = @import("std");
-const Loop = @import("../daemon/Loop.zig");
+const Loop = @import("../daemon/loop.zig").Loop;
 const Client = @import("../rex/Client.zig");
 const PaneHost = @import("PaneHost.zig");
 const debug_panes = @import("panes.zig");

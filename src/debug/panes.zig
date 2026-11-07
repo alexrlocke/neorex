@@ -4,7 +4,7 @@
 
 const std = @import("std");
 const net = std.Io.net;
-const Loop = @import("../daemon/Loop.zig");
+const Loop = @import("../daemon/loop.zig").Loop;
 const PaneHost = @import("PaneHost.zig");
 
 const token_signal = 0;

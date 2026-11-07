@@ -4,7 +4,7 @@
 const std = @import("std");
 const ids = @import("../rex/ids.zig");
 const Surface = @import("Surface.zig");
-const Loop = @import("Loop.zig");
+const Loop = @import("loop.zig").Loop;
 const FloatGroups = @import("../screen/FloatGroups.zig");
 
 const Pane = @This();
