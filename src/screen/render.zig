@@ -83,14 +83,23 @@ pub fn drawRow(row: []const Grid.Cell, style: *const Style, r: u32, cols: u32, w
         while (clear_col > 0 and isBlank(cells[clear_col - 1], clear_hl)) clear_col -= 1;
     }
 
+    // A hyperlink (OSC 8) stays open across moves and SGR resets, so each
+    // one is closed before the row ends: nothing drawn later is linked.
+    var link: ?u32 = null;
     for (cells[0..clear_col], 0..) |*cell, c| {
         // the right half of a wide char: the terminal already moved past it
         if (cell.len == 0) continue;
         try setHl(style, cell.hl, w, current);
+        const want = style.attr(cell.hl).url;
+        if (!std.meta.eql(want, link)) {
+            try writeLink(style.url(.{ .url = want }), w);
+            link = want;
+        }
         // a wide char cut in half at the edge would wrap
         const cut = c + 1 == cells.len and cells.len < row.len and row[c + 1].len == 0;
         try w.writeAll(if (cut) " " else cell.str());
     }
+    if (link != null) try writeLink(null, w);
     if (clear_col < cells.len) {
         // EL fills with the current background
         try setHl(style, clear_hl, w, current);
@@ -99,6 +108,11 @@ pub fn drawRow(row: []const Grid.Cell, style: *const Style, r: u32, cols: u32, w
         // past a grid narrower than the terminal
         try clearToEnd(style, w, current);
     }
+}
+
+/// OSC 8: the text that follows links to `target`, or, for null, isn't a link.
+fn writeLink(target: ?[]const u8, w: *Writer) Writer.Error!void {
+    try w.print("\x1b]8;;{s}\x1b\\", .{target orelse ""});
 }
 
 /// Blanks terminal row `r` in the default colors.
@@ -290,6 +304,22 @@ test "rows are cut at the terminal's width; past a narrow grid is cleared" {
     w.end = 0;
     try drawRow(f.g.row(0), &f.s, 0, 6, &w, &current);
     try testing.expectEqualStrings("\x1b[1;1Hab界\x1b[0m\x1b[K", w.buffered());
+}
+
+test "a link opens at its text and closes before the row ends" {
+    var f = try Fixture.init(5, 1);
+    defer f.deinit();
+    try f.s.urls.append(testing.allocator, try testing.allocator.dupe(u8, "file:///a.html"));
+    try f.s.attrs.append(testing.allocator, .{ .url = 0 });
+    f.g.cells[0] = .init("<", 0);
+    f.g.cells[1] = .init("a", 3);
+    f.g.cells[2] = .init("b", 3);
+    f.g.cells[3] = .init(">", 0);
+    f.g.cells[4] = .init("c", 3);
+    try f.expectFrame(begin_s ++ "\x1b[1;1H" ++
+        "\x1b[0m<" ++ "\x1b[0m\x1b]8;;file:///a.html\x1b\\ab" ++ "\x1b[0m\x1b]8;;\x1b\\>" ++
+        "\x1b[0m\x1b]8;;file:///a.html\x1b\\c" ++ "\x1b]8;;\x1b\\" ++
+        "\x1b[0m\x1b[1;1H" ++ end_s);
 }
 
 test "sgr draws palette indices when RGB is null" {

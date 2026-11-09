@@ -10,6 +10,8 @@ const Style = @This();
 
 /// Highlight attributes by id. Id 0 is the default.
 attrs: std.ArrayList(Attr) = .empty,
+/// The link targets highlights point at (`Attr.url`), each kept once.
+urls: std.ArrayList([]u8) = .empty,
 /// Defaults for colors an `Attr` leaves null.
 default_fg: ?u24 = null,
 default_bg: ?u24 = null,
@@ -62,12 +64,16 @@ pub const Attr = struct {
     underline: Underline = .none,
     /// 0 to 100.
     blend: u8 = 0,
+    /// Index of the link target in `Style.urls`: the text is a hyperlink.
+    url: ?u32 = null,
 
     pub const Underline = enum { none, single, curl, double, dotted, dashed };
 };
 
 pub fn deinit(self: *Style, gpa: Allocator) void {
     self.attrs.deinit(gpa);
+    for (self.urls.items) |u| gpa.free(u);
+    self.urls.deinit(gpa);
     self.cursor_modes.deinit(gpa);
     self.* = undefined;
 }
@@ -79,6 +85,11 @@ pub fn attr(self: *const Style, hl: u32) Attr {
         return if (i < self.blended_len) self.blended[i].attr else .{};
     }
     return if (hl < self.attrs.items.len) self.attrs.items[hl] else .{};
+}
+
+/// The link target of a highlight's text, if it is a hyperlink.
+pub fn url(self: *const Style, a: Attr) ?[]const u8 {
+    return self.urls.items[a.url orelse return null];
 }
 
 /// Forgets the blended highlights; call at the start of each frame.
@@ -147,7 +158,7 @@ pub fn apply(self: *Style, gpa: Allocator, event: Event, d: *msgpack.Decoder, le
         .hl_attr_define => {
             if (len < 2) return error.BadMessage;
             const id = try expectInt(d, u32);
-            var a = try readAttr(d);
+            var a = try self.readAttr(gpa, d);
             if (len >= 3) try readCtermColors(d, &a);
             // A highlight with an RGB color belongs to an RGB colorscheme,
             // whose palette indices are only for 256-color terminals: the
@@ -211,8 +222,8 @@ fn readCursorMode(d: *msgpack.Decoder) !CursorMode {
     return m;
 }
 
-/// An `rgb_attr` map. Unknown keys, such as `url`, are skipped.
-fn readAttr(d: *msgpack.Decoder) !Attr {
+/// An `rgb_attr` map. Unknown keys are skipped.
+fn readAttr(self: *Style, gpa: Allocator, d: *msgpack.Decoder) !Attr {
     var a: Attr = .{};
     const n = try rpc.expectMap(d);
     for (0..n) |_| {
@@ -249,9 +260,23 @@ fn readAttr(d: *msgpack.Decoder) !Attr {
             .underdashed => if (try rpc.expectBool(d)) {
                 a.underline = .dashed;
             },
+            .url => a.url = try self.intern(gpa, try rpc.expectStr(d)),
         }
     }
     return a;
+}
+
+/// `target`'s index in `urls`, added if new. Null for a target holding a
+/// control character, which would end the escape sequence that carries it.
+fn intern(self: *Style, gpa: Allocator, target: []const u8) !?u32 {
+    for (target) |c| if (c < 0x20 or c == 0x7f) return null;
+    for (self.urls.items, 0..) |u, i| {
+        if (std.mem.eql(u8, u, target)) return @intCast(i);
+    }
+    const owned = try gpa.dupe(u8, target);
+    errdefer gpa.free(owned);
+    try self.urls.append(gpa, owned);
+    return @intCast(self.urls.items.len - 1);
 }
 
 /// The palette colors from a `cterm_attr` map, into `a`. Its other keys
@@ -291,6 +316,7 @@ const AttrKey = enum {
     underdouble,
     underdotted,
     underdashed,
+    url,
 };
 
 fn expectInt(d: *msgpack.Decoder, comptime T: type) !T {
@@ -338,4 +364,14 @@ test "a float blends over what's under it" {
     const clear = style.attr(style.blendOver(1, 4, true));
     try std.testing.expectEqual(@as(?u24, 0x666666), clear.fg);
     try std.testing.expectEqual(@as(?u24, null), clear.bg);
+}
+
+test "link targets are kept once, and never with control characters" {
+    var style: Style = .{};
+    defer style.deinit(std.testing.allocator);
+    const a = try style.intern(std.testing.allocator, "file:///a.html");
+    try std.testing.expectEqual(a, try style.intern(std.testing.allocator, "file:///a.html"));
+    try std.testing.expect(!std.meta.eql(a, try style.intern(std.testing.allocator, "file:///b.html")));
+    try std.testing.expectEqual(@as(?u32, null), try style.intern(std.testing.allocator, "x\x1b\\y"));
+    try std.testing.expectEqual(@as(usize, 2), style.urls.items.len);
 }

@@ -561,6 +561,8 @@ test "hl_attr_define and default colors" {
     try testing.expectEqual(@as(?u24, null), a.bg);
     try testing.expect(a.bold and !a.italic);
     try testing.expectEqual(Style.Attr.Underline.curl, a.underline);
+    try testing.expectEqualStrings("https://neovim.io", s.url(a).?);
+    try testing.expectEqual(@as(?[]const u8, null), s.url(s.attrs.items[0]));
     try testing.expectEqual(@as(usize, 6), s.attrs.items.len);
 }
 

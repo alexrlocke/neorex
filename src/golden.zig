@@ -197,6 +197,23 @@ fn expectCell(pc: anytype, style: *const Style, cell: Grid.Cell) !void {
         std.debug.print("want {any}\n got {any}\n", .{ expected, actual });
         return error.LookMismatch;
     }
+    // a blank has nothing to click
+    if (n == 1 and want[0] == ' ') return;
+    const want_link = style.url(style.attr(cell.hl));
+    const got_link = termLink(pc);
+    if (want_link == null and got_link == null) return;
+    if (want_link == null or got_link == null or !std.mem.eql(u8, want_link.?, got_link.?)) {
+        std.debug.print("want link {?s}\n got link {?s}\n", .{ want_link, got_link });
+        return error.LinkMismatch;
+    }
+}
+
+/// The URI of the hyperlink (OSC 8) the cell is part of, if any.
+fn termLink(pc: anytype) ?[]const u8 {
+    if (!pc.cell.hyperlink) return null;
+    const page = pc.node.page();
+    const id = page.lookupHyperlink(pc.cell) orelse return null;
+    return page.hyperlink_set.get(page.memory, id).uri.slice(page.memory);
 }
 
 fn dump(t: *vt.Terminal, g: *const Grid) !void {
@@ -266,6 +283,30 @@ test "styles, wide chars and blanks" {
     try check(&t, &g, &style);
 }
 
+test "links cover their text and nothing drawn after" {
+    var t = try testTerminal(8, 2);
+    defer t.deinit(gpa);
+    var style: Style = .{ .default_fg = 0xeeeeee, .default_bg = 0x111111 };
+    defer style.deinit(gpa);
+    var g: Grid = .{};
+    defer g.deinit(gpa);
+    try g.resize(gpa, 8, 2);
+    try style.urls.appendSlice(gpa, &.{ try gpa.dupe(u8, "file:///a.html"), try gpa.dupe(u8, "https://b.example") });
+    try style.attrs.appendSlice(gpa, &.{ .{}, .{ .url = 0, .underline = .single }, .{ .url = 1 } });
+    // two links side by side, then plain text; the next row starts plain
+    for ("ab", 0..) |c, i| g.cells[i] = .init(&.{c}, 1);
+    for ("cd", 2..) |c, i| g.cells[i] = .init(&.{c}, 2);
+    g.cells[4] = .init("e", 0);
+    g.cells[7] = .init("f", 1);
+    g.cells[8] = .init("g", 0);
+    try check(&t, &g, &style);
+
+    // redrawn alone, a row still opens and closes its own links
+    g.cells[1] = .init("B", 0);
+    g.dirty.set(0);
+    try check(&t, &g, &style);
+}
+
 /// Steps of keys for the live test. Each runs once the last has settled.
 const steps = [_][]const u8{
     ":set number cursorline<CR>",
@@ -293,6 +334,9 @@ const steps = [_][]const u8{
     "ohello",
     "<Esc>",
     "dd",
+    // parsed at once, so the link is marked before the step settles
+    ":let g:_ts_force_sync_parsing = v:true<CR>:set filetype=markdown<CR>:lua vim.treesitter.start()<CR>",
+    "o[docs](https://neovim.io) and text<Esc>",
 };
 
 test "live neovim session" {
@@ -325,6 +369,8 @@ test "live neovim session" {
     try testing.expect(stats.frames > steps.len);
     try testing.expect(stats.scrolls > 0);
     try testing.expect(stats.bar_cursor > 0);
+    // Neovim marked the markdown link, so a frame drew it
+    try testing.expect(gs.style.urls.items.len > 0);
 }
 
 const Stats = struct { frames: usize = 0, scrolls: usize = 0, bar_cursor: usize = 0 };
