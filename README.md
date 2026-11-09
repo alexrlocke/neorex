@@ -50,6 +50,32 @@ a tarball you downloaded yourself:
 minisign -Vm neorex-aarch64-macos.tar.gz -P RWTUrMrkIYNmaNjwVEClcft4M6dHuMfeGANG4UjMbsjqbQQy7ngYtsD1
 ```
 
+### Nix
+
+The flake builds neorex from source for Linux and Apple Silicon Macs:
+
+```sh
+nix run github:alexrlocke/neorex             # try it
+nix profile install github:alexrlocke/neorex # install it
+```
+
+Or add it as a flake input:
+
+```nix
+inputs.neorex = {
+  url = "github:alexrlocke/neorex";
+  inputs.nixpkgs.follows = "nixpkgs"; # reuse your nixpkgs instead of a second copy
+};
+```
+
+then either use
+`inputs.neorex.packages.${pkgs.stdenv.hostPlatform.system}.default`, or add
+`inputs.neorex.overlays.default` to your nixpkgs overlays and use
+`pkgs.neorex`.
+
+The colorscheme and lualine theme are in the package's
+`share/neorex/runtime`. neorex uses the `nvim` on your `PATH`.
+
 ## Build from source
 
 ```sh
