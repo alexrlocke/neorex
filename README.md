@@ -20,7 +20,7 @@ AI has been used heavily in building neorex due to limits on my available time. 
 
 ## Requirements
 
-- macOS (it uses kqueue)
+- macOS or Linux
 - [Rex](https://www.superlogical.com/rex), with its setting to auto-balance
   splits turned off. Otherwise Rex evens out every new split, so a sidebar
   such as neo-tree opens at half the window instead of its own width.

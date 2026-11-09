@@ -29,21 +29,25 @@ pub fn init(signals: []const std.c.SIG) !Signals {
     // before installing, so the handler never sees -1
     handler_fd = self.write_fd;
 
+    for (signals) |sig| self.add(sig);
+    return self;
+}
+
+/// Installs the handler for `sig` too. Adding it again does nothing.
+pub fn add(self: *Signals, sig: std.c.SIG) void {
+    const n = @backingInt(sig);
+    std.debug.assert(n < self.old.len);
+    // only the first time, so a second call can't save our own handler
+    if (self.old[n] != null) return;
+
     const action: std.c.Sigaction = .{
         .handler = .{ .handler = handle },
         .mask = std.posix.sigemptyset(),
         .flags = std.c.SA.RESTART,
     };
-
-    for (signals) |sig| {
-        const n = @backingInt(sig);
-        std.debug.assert(n < self.old.len);
-        var old: std.c.Sigaction = undefined;
-        std.posix.sigaction(sig, &action, &old);
-        self.old[n] = old;
-    }
-
-    return self;
+    var old: std.c.Sigaction = undefined;
+    std.posix.sigaction(sig, &action, &old);
+    self.old[n] = old;
 }
 
 /// Writes the signal number to the pipe. Only async-signal-safe calls here.
@@ -102,6 +106,15 @@ test "raise then drain" {
     const fired = try s.drain();
     try std.testing.expect(fired.contains(.WINCH));
     try std.testing.expect(!fired.contains(.TERM));
+}
+
+test "signals added later arrive too" {
+    var s = try Signals.init(&.{});
+    defer s.deinit();
+    s.add(.WINCH);
+    s.add(.WINCH);
+    _ = std.c.raise(.WINCH);
+    try std.testing.expect((try s.drain()).contains(.WINCH));
 }
 
 test "empty drain" {

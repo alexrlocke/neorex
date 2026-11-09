@@ -12,7 +12,7 @@ const max_fds = 4;
 pub fn send(w: *net.Stream.Writer, bytes: []const u8, fd: fd_t) !void {
     std.debug.assert(bytes.len > 0);
     var control: [net.cmsg.space(@sizeOf(fd_t))]u8 align(net.cmsg_align) = @splat(0);
-    const header: *std.posix.cmsghdr = @ptrCast(&control);
+    const header: *align(net.cmsg_align) std.posix.cmsghdr = @ptrCast(&control);
     header.* = .{ .len = net.cmsg.len(@sizeOf(fd_t)), .level = std.c.SOL.SOCKET, .type = std.c.SCM.RIGHTS };
     @memcpy(net.cmsg.data(header)[0..@sizeOf(fd_t)], std.mem.asBytes(&fd));
 
@@ -43,7 +43,7 @@ pub fn recv(stream: net.Stream, io: std.Io, buf: []u8) !Received {
     var it: net.cmsg.Iterator = .{ .control = control[0..r.control_len] };
     while (it.next()) |m| {
         if (m.header.level != std.c.SOL.SOCKET or m.header.type != std.c.SCM.RIGHTS) continue;
-        var fds = m.data;
+        var fds: []const u8 = m.data;
         while (fds.len >= @sizeOf(fd_t)) : (fds = fds[@sizeOf(fd_t)..]) {
             const got = std.mem.bytesToValue(fd_t, fds[0..@sizeOf(fd_t)]);
             if (fd != null) {

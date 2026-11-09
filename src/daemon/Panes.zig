@@ -4,6 +4,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Pane = @import("Pane.zig");
+const Loop = @import("loop.zig").Loop;
 const FloatGroups = @import("../screen/FloatGroups.zig");
 
 const Panes = @This();
@@ -12,7 +13,9 @@ list: std.ArrayList(Pane) = .empty,
 /// Never reused, so a stale token can't reach a newer pane. 0 is the startup pane.
 next_id: u32 = 1,
 
-/// Hangs up every pane still open.
+/// Hangs up every pane still open. Unlike `remove`, it leaves their fds in
+/// the loop: the loop is torn down straight after, and closing it drops
+/// every registration.
 pub fn deinit(self: *Panes, gpa: Allocator, io: std.Io) void {
     for (self.list.items) |*p| {
         if (p.closing == null) p.closing = .shutdown;
@@ -42,9 +45,11 @@ pub fn addForGroup(self: *Panes, gpa: Allocator, g: FloatGroups.Group) !*Pane {
     return p;
 }
 
-/// Hangs up pane `i` and forgets it. Set its `closing` first.
-pub fn remove(self: *Panes, gpa: Allocator, io: std.Io, i: usize) void {
+/// Takes pane `i`'s fds out of `loop`, hangs it up and forgets it. Set its
+/// `closing` first.
+pub fn remove(self: *Panes, gpa: Allocator, io: std.Io, loop: *const Loop, i: usize) void {
     var p = self.list.orderedRemove(i);
+    p.unregisterFrom(loop);
     p.deinit(gpa, io);
 }
 
@@ -77,10 +82,12 @@ pub fn byLayerKey(self: *const Panes, key: i64) ?*Pane {
 const testing = std.testing;
 
 test "ids are never reused" {
+    var loop: Loop = try .init();
+    defer loop.deinit();
     var panes: Panes = .{};
     defer panes.deinit(testing.allocator, testing.io);
     const a = (try panes.addForWindow(testing.allocator, 1000)).id;
-    panes.remove(testing.allocator, testing.io, panes.indexOf(a).?);
+    panes.remove(testing.allocator, testing.io, &loop, panes.indexOf(a).?);
     const b = (try panes.addForWindow(testing.allocator, 1001)).id;
     try testing.expect(b != a);
     try testing.expectEqual(null, panes.byId(a));

@@ -4,7 +4,7 @@
 const std = @import("std");
 const ids = @import("../rex/ids.zig");
 const Surface = @import("Surface.zig");
-const Loop = @import("Loop.zig");
+const Loop = @import("loop.zig").Loop;
 const FloatGroups = @import("../screen/FloatGroups.zig");
 
 const Pane = @This();
@@ -148,6 +148,15 @@ pub fn registerWith(self: *Pane, loop: *Loop) !void {
     const surface = self.terminal_surface.?;
     try loop.addRead(surface.helper_socket.socket.handle, self.token(.helper_socket));
     try loop.addRead(surface.terminal.fd, self.token(.terminal));
+}
+
+/// Takes the helper and terminal fds back from the loop: the reverse of
+/// registerWith. Call before deinit closes them. A remove that fails means
+/// that fd was never added (registerWith failed partway), so it's ignored.
+pub fn unregisterFrom(self: *const Pane, loop: *const Loop) void {
+    const surface = self.terminal_surface orelse return;
+    loop.remove(surface.helper_socket.socket.handle) catch {};
+    loop.remove(surface.terminal.fd) catch {};
 }
 
 const testing = std.testing;

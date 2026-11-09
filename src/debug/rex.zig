@@ -3,8 +3,9 @@
 //! terminal over as debug-panes does, and prints Rex's events. Ctrl+C quits.
 
 const std = @import("std");
-const Loop = @import("../daemon/Loop.zig");
+const Loop = @import("../daemon/loop.zig").Loop;
 const Client = @import("../rex/Client.zig");
+const rex_server = @import("../rex/server.zig");
 const PaneHost = @import("PaneHost.zig");
 const debug_panes = @import("panes.zig");
 
@@ -16,7 +17,8 @@ const token_panes = 3;
 pub fn run(gpa: std.mem.Allocator, io: std.Io, socket_path: []const u8) !void {
     // the pane starts elsewhere, so the path must work from any directory
     if (!std.fs.path.isAbsolute(socket_path)) return error.SocketPathNotAbsolute;
-    const server_url = std.mem.span(std.c.getenv("REX_SERVER") orelse return error.NoRexServer);
+    const server_url = try rex_server.url(gpa, io);
+    defer gpa.free(server_url);
     const session_id = std.mem.span(std.c.getenv("REX_SESSION") orelse return error.NoRexSession);
     const anchor_id: ?[]const u8 = if (std.c.getenv("REX_BLOCK")) |b| std.mem.span(b) else null;
     var exe_buf: [1024]u8 = undefined;
@@ -40,7 +42,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, socket_path: []const u8) !void {
 
     var out_bufs: PaneHost.OutBufs = undefined;
     var host: PaneHost = .{ .out_bufs = &out_bufs, .base = token_panes, .name = "debug-rex" };
-    defer host.deinit(io);
+    defer host.deinit(io, &loop);
 
     const attach_id = try rex.request(gpa, "session.attach", .{ .session_id = session_id });
     var split_id: ?u64 = null;
@@ -91,7 +93,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, socket_path: []const u8) !void {
                     },
                 };
             },
-            else => if (host.owns(e.token)) try host.handle(io, e.token),
+            else => if (host.owns(e.token)) try host.handle(io, &loop, e.token),
         };
         if (pending_accept) try host.accept(io, &loop, &server);
     }
