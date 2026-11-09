@@ -1,0 +1,74 @@
+name: release
+
+# Push a tag like v0.1.0 to build every target and publish a GitHub Release.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+
+      - name: Check tag matches build.zig.zon version
+        run: |
+          zon=$(sed -n 's/^ *\.version = "\(.*\)",/\1/p' build.zig.zon)
+          if [ "v$zon" != "$GITHUB_REF_NAME" ]; then
+            echo "tag $GITHUB_REF_NAME does not match build.zig.zon version $zon" >&2
+            exit 1
+          fi
+
+      - name: Test
+        run: zig build test
+
+      # Zig cross-compiles everything from one Linux runner. Linux builds use
+      # musl so the binaries are static and run on any distro.
+      - name: Build
+        run: |
+          mkdir -p dist
+          for target in x86_64-linux-musl aarch64-linux-musl x86_64-macos aarch64-macos; do
+            name="neorex-${target%-musl}"
+            zig build -Dtarget="$target" -Doptimize=ReleaseSafe -Dstrip --prefix "stage/$name"
+            cp -r runtime LICENSE README.md "stage/$name/"
+            tar -C stage -czf "dist/$name.tar.gz" "$name"
+          done
+          (cd dist && sha256sum neorex-*.tar.gz > checksums.txt)
+
+      # Signs each tarball with minisign, like Zig and Ghostty releases.
+      # Secrets: MINISIGN_SECRET_KEY (the contents of the secret key file)
+      # and MINISIGN_PASSWORD (its password).
+      - name: Sign
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq minisign
+          key=$(mktemp)
+          trap 'rm -f "$key"' EXIT
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > "$key"
+          for f in dist/neorex-*.tar.gz; do
+            printf '%s' "$MINISIGN_PASSWORD" |
+              minisign -S -s "$key" -m "$f" -t "neorex $GITHUB_REF_NAME $(basename "$f")"
+          done
+
+      # Checks the signatures against the public key install.sh trusts, so a
+      # release can't ship signed with a key users won't accept.
+      - name: Verify signatures
+        run: |
+          pubkey=$(sed -n 's/^pubkey="\(.*\)"$/\1/p' install.sh)
+          for f in dist/neorex-*.tar.gz; do
+            minisign -V -q -P "$pubkey" -m "$f"
+          done
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
