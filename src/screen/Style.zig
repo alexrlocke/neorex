@@ -19,8 +19,11 @@ cursor_modes: std.ArrayList(CursorMode) = .empty,
 /// False when 'guicursor' is empty: leave the terminal's cursor alone.
 cursor_style_enabled: bool = false,
 mode_idx: u32 = 0,
+/// Neovim's mode from the last `mode_change`, as far as window commands care.
+mode: Mode = .normal,
 /// Between busy_start and busy_stop, the cursor is hidden.
 busy: bool = false,
+
 /// Highlights made by blending a float over what's under it, with ids
 /// from `blend_base`. Good for one frame: cleared by `clearBlends`.
 blended: [max_blended]Blended = undefined,
@@ -177,7 +180,7 @@ pub fn apply(self: *Style, gpa: Allocator, event: Event, d: *msgpack.Decoder, le
         },
         .mode_change => {
             if (len < 2) return error.BadMessage;
-            try rpc.skip(d); // mode name
+            self.mode = Mode.fromName(try rpc.expectStr(d));
             self.mode_idx = try expectInt(d, u32);
             return 2;
         },
@@ -339,3 +342,35 @@ test "a float blends over what's under it" {
     try std.testing.expectEqual(@as(?u24, 0x666666), clear.fg);
     try std.testing.expectEqual(@as(?u24, null), clear.bg);
 }
+
+/// The editor modes, as `<C-w>` commands see them: `<C-w>` deletes a word in
+/// insert and terminal modes, and edits text in replace mode.
+pub const Mode = enum {
+    normal,
+    insert,
+    visual,
+    select,
+    operator,
+    replace,
+    cmdline,
+    terminal,
+    other,
+
+    fn fromName(name: []const u8) Mode {
+        // visual modes carry a submode, as in "visual_select"; the prefix decides
+        const base = if (std.mem.indexOfScalar(u8, name, '_')) |at| name[0..at] else name;
+        const modes = [_]Mode{ .normal, .insert, .visual, .select, .operator, .replace, .cmdline, .terminal };
+        inline for (modes) |m| {
+            if (std.mem.eql(u8, base, @tagName(m))) return m;
+        }
+        return .other;
+    }
+
+    /// True in the modes where `<C-w>` is Neovim's window prefix.
+    pub fn takesWindowCommands(self: Mode) bool {
+        return switch (self) {
+            .normal, .visual, .select, .operator => true,
+            else => false,
+        };
+    }
+};

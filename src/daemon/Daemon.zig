@@ -18,6 +18,7 @@ const FloatGroups = @import("../screen/FloatGroups.zig");
 const PaneView = @import("../screen/PaneView.zig");
 const Client = @import("../rex/Client.zig");
 const layout = @import("../rex/layout.zig");
+const ids = @import("../rex/ids.zig");
 const LayoutTree = @import("../rex/LayoutTree.zig");
 const Loop = @import("loop.zig").Loop;
 const Pane = @import("Pane.zig");
@@ -25,6 +26,7 @@ const Panes = @import("Panes.zig");
 const RexSession = @import("../rex/Session.zig");
 const NvimSession = @import("NvimSession.zig");
 const WindowChanges = @import("WindowChanges.zig");
+const WindowKeys = @import("../term/window_keys.zig");
 const Titles = @import("Titles.zig");
 const Surface = @import("Surface.zig");
 const pane_helper = @import("pane_helper.zig");
@@ -46,6 +48,8 @@ changes: WindowChanges = .{},
 titles: Titles = .{},
 /// Rex's tiled layout of the window holding our panes, as its last view had it.
 rex_layout: LayoutTree = .{},
+/// Watches keys for `<C-w>` window commands and does the same to Rex.
+window_keys: WindowKeys = WindowKeys.init(),
 /// Set by `stop`; `run` returns it.
 stopped: ?StopReason = null,
 
@@ -186,6 +190,7 @@ fn accept(self: *Daemon, server: *net.Server) !void {
         hello.close(self.io);
         return err;
     };
+    pane.terminal_surface.?.forwarder.window_keys = &self.window_keys;
     try pane.registerWith(self.loop);
     if (pane.awaiting_layout) {
         const v = pane.terminal_surface.?.view;
@@ -266,6 +271,9 @@ fn onInput(self: *Daemon, pane: *Pane) !void {
     // a floating pane's default grid is set as it draws
     if (pane.layer == null) surface.forwarder.grid = self.gridOfPane(pane) orelse 0;
     _ = try surface.forwarder.feed(self.nvim.client, bytes);
+    // the keys went to Neovim first: these are only the Rex side of them
+    while (self.window_keys.next()) |op| self.applyWindowOp(pane, op) catch |err|
+        std.debug.print("neorex daemon: <C-w> command failed: {s}\n", .{@errorName(err)});
 }
 
 /// Typed into a pane Rex hasn't focused, as `rex send` can. Focus reports
@@ -429,6 +437,116 @@ fn onResize(self: *Daemon, rz: windows.Resize) !void {
             .after_block_id = @as([]const u8, &b.after_block),
             .ratio = ratio,
         });
+    }
+}
+
+/// Runs the Rex side of a `<C-w>` command Neovim has just run. The keys were
+/// forwarded, so Neovim's own layout is already right; this makes the panes
+/// show the same thing. Never fatal: the user's keystrokes already landed.
+fn applyWindowOp(self: *Daemon, pane: *Pane, op: WindowKeys.Op) !void {
+    // in insert and terminal modes `<C-w>` deletes a word, not a window
+    if (!self.grids.style.mode.takesWindowCommands()) return;
+    if (pane.layer != null) return;
+    const block = pane.rex_block orelse return;
+    switch (op) {
+        .swap => |s| {
+            const target = self.blockAtEdge(block, s.direction) orelse return;
+            try self.rex.request(.swap_blocks, "session.swap_blocks", .{
+                .session_id = self.rex.session_id,
+                .block_id = @as([]const u8, &block),
+                .other_block_id = @as([]const u8, &target),
+            });
+            // the pane typed into keeps the focus, wherever swap_blocks put it
+            try self.rex.focus(block);
+        },
+        .resize => |r| {
+            const cells: i32 = @intCast(@min(r.count, 100));
+            try self.moveBorder(block, r.axis, if (r.grow) cells else -cells);
+        },
+        .equalize => if (self.rex_layout.root) |root| try self.equalizeNode(root),
+    }
+}
+
+/// Moves the border beside `block` across `axis` by `delta` cells, growing
+/// the block when `delta` is positive. Same math as Neovim's own resizes.
+fn moveBorder(self: *Daemon, block: ids.Block, axis: WindowKeys.Axis, delta: i32) !void {
+    // zoomed, the pane fills the window whatever its borders say
+    if (self.rex_layout.zoomed_block != null) return;
+    const dir: LayoutTree.Direction = if (axis == .vertical) .vertical else .horizontal;
+    const at: usize = if (axis == .vertical) 1 else 0;
+    const b = self.rex_layout.border(&block, dir) orelse return;
+    const n = self.rex_layout.node(b.split);
+    const across = sizing.scaled(self.nvim.editor_size[at], n.rect[2 + at]);
+    // movedRatio grows the block before the border for a positive delta
+    const signed = if (b.side == .before) delta else -delta;
+    const ratio = sizing.movedRatio(n.kind.split.ratio, signed, across, b.side == .before) orelse return;
+    self.rex_layout.setRatio(b.split, ratio);
+    try self.rex.request(.resize_pane, "session.resize_pane", .{
+        .session_id = self.rex.session_id,
+        .direction = @tagName(dir),
+        .before_block_id = @as([]const u8, &b.before_block),
+        .after_block_id = @as([]const u8, &b.after_block),
+        .ratio = ratio,
+    });
+}
+
+/// The furthest of our tiled panes from `block` in `direction`, which is
+/// where Neovim's `<C-w>H/J/K/L` puts the window: swapping with it leaves
+/// the same order Neovim chose.
+fn blockAtEdge(self: *Daemon, block: ids.Block, direction: WindowKeys.Direction) ?ids.Block {
+    const cur = self.rectOf(block) orelse return null;
+    var best: ?ids.Block = null;
+    var best_score: f64 = 0;
+    for (self.rex_layout.nodes.items) |*node| {
+        const id = switch (node.kind) {
+            .block => |b| b orelse continue,
+            .split => continue,
+        };
+        if (ids.sameBlock(id, block)) continue;
+        const other = self.panes.byBlock(&id) orelse continue;
+        if (other.layer != null) continue;
+        const score: f64 = switch (direction) {
+            .left => if (node.rect[0] + node.rect[2] <= cur[0]) cur[0] - node.rect[0] else continue,
+            .right => if (node.rect[0] >= cur[0] + cur[2]) node.rect[0] - cur[0] else continue,
+            .up => if (node.rect[1] + node.rect[3] <= cur[1]) cur[1] - node.rect[1] else continue,
+            .down => if (node.rect[1] >= cur[1] + cur[3]) node.rect[1] - cur[1] else continue,
+        };
+        if (best == null or score > best_score) {
+            best = id;
+            best_score = score;
+        }
+    }
+    return best;
+}
+
+fn rectOf(self: *const Daemon, block: ids.Block) ?layout.Rect {
+    for (self.rex_layout.nodes.items) |*node| switch (node.kind) {
+        .block => |b| if (b) |id| if (ids.sameBlock(id, block)) return node.rect,
+        .split => {},
+    };
+    return null;
+}
+
+/// Gives every split below `i` the same share, deepest first so the borders
+/// inside a split are settled before the split itself.
+fn equalizeNode(self: *Daemon, i: LayoutTree.Index) !void {
+    switch (self.rex_layout.node(i).kind) {
+        .block => {},
+        .split => |sp| {
+            try self.equalizeNode(sp.before);
+            try self.equalizeNode(sp.after);
+            if (@abs(sp.ratio - 0.5) < 0.001) return;
+            const before = self.rex_layout.endBlock(sp.before, .after) orelse return;
+            const after = self.rex_layout.endBlock(sp.after, .before) orelse return;
+            self.rex_layout.setRatio(i, 0.5);
+            try self.rex.request(.resize_pane, "session.resize_pane", .{
+                .session_id = self.rex.session_id,
+                .direction = @tagName(sp.direction),
+                .before_block_id = @as([]const u8, &before),
+                .after_block_id = @as([]const u8, &after),
+                .ratio = 0.5,
+            });
+        },
     }
 }
 

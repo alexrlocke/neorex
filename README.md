@@ -138,8 +138,11 @@ Plugins that set their own RGB colors keep them.
 
 ## Current limitations
 
-- The `<C-w>` resize, swap and move commands do nothing. Use Rex's own pane
-  controls instead.
+- `<C-w>H/J/K/L` move a window to the far left/bottom/top/right of the Rex
+  window, and `<C-w>+/-/</>` resize it against its neighbour, `<C-w>=` evens
+  out the splits. `<C-w>r` (rotate), `<C-w>x` (exchange) and `<C-w>T` still
+  do nothing; use Rex's own pane controls for those. Set
+  `NEOREX_WINDOW_KEYS=off` to leave every `<C-w>` command to Neovim.
 - Plugins that arrange windows (sidebars, layout managers) don't get the
   placement they expect.
 - Only one tab page: Neovim tab pages aren't Rex tabs.

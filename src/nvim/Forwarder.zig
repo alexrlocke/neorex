@@ -6,6 +6,7 @@ const Writer = std.Io.Writer;
 const input = @import("../term/input.zig");
 const msgpack = @import("msgpack.zig");
 const Nvim = @import("Nvim.zig");
+const WindowKeys = @import("../term/window_keys.zig");
 
 const Forwarder = @This();
 
@@ -26,6 +27,8 @@ grab: ?Target = null,
 send_focus: bool = true,
 /// The last focus report seen.
 focused: ?bool = null,
+/// Watches keys for `<C-w>` window commands; null when nothing does.
+window_keys: ?*WindowKeys = null,
 
 /// A float's grid and where it's drawn, in terminal cells.
 pub const Target = struct { grid: u32, row: i32, col: i32, width: u32, height: u32 };
@@ -64,6 +67,7 @@ pub fn feed(self: *Forwarder, nvim: *Nvim, bytes: []const u8) !bool {
     self.parser.feed(bytes);
     while (self.parser.next()) |event| switch (event) {
         .key => |k| {
+            if (self.window_keys) |w| w.observe(k);
             if (self.ctrl_q_quits and isQuit(k)) return false;
             // room for the longest key name
             if (keys.unusedCapacityLen() < 32) try sendKeys(nvim, &keys);
