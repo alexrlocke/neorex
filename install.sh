@@ -8,7 +8,7 @@ set -eu
 
 repo="alexrlocke/neorex"
 # minisign public key that release tarballs are signed with
-pubkey="RWTUrMrkIYNmaNjwVEClcft4M6dHuMfeGANG4UjMbsjqbQQy7ngYtsD1"
+pubkey="RWSx8dufrslQk2iEQLeMJnfJIR4h1mg8j6JDo9UBbyzcQIF4cjAA6Z4w"
 
 case "$(uname -s)" in
   Linux) os=linux ;;

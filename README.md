@@ -47,7 +47,7 @@ The install script checks the signature when minisign is installed. To check
 a tarball you downloaded yourself:
 
 ```sh
-minisign -Vm neorex-aarch64-macos.tar.gz -P RWTUrMrkIYNmaNjwVEClcft4M6dHuMfeGANG4UjMbsjqbQQy7ngYtsD1
+minisign -Vm neorex-aarch64-macos.tar.gz -P RWSx8dufrslQk2iEQLeMJnfJIR4h1mg8j6JDo9UBbyzcQIF4cjAA6Z4w
 ```
 
 ### Nix
