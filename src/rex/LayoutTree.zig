@@ -244,7 +244,7 @@ fn find(self: *const LayoutTree, i: Index, block: ids.Block, buf: []Step, len: *
 }
 
 /// The block at one end of node `i`: following `before` sides, or `after`.
-fn endBlock(self: *const LayoutTree, i: Index, end: Side) ?ids.Block {
+pub fn endBlock(self: *const LayoutTree, i: Index, end: Side) ?ids.Block {
     var at = i;
     while (true) switch (self.node(at).kind) {
         .block => |b| return b,
