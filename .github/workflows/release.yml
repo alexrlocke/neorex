@@ -26,8 +26,9 @@ jobs:
             exit 1
           fi
 
+      # in the mode the binaries ship in
       - name: Test
-        run: zig build test
+        run: zig build test -Doptimize=ReleaseSafe
 
       # Zig cross-compiles everything from one Linux runner. Linux builds use
       # musl so the binaries are static and run on any distro.

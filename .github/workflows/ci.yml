@@ -1,0 +1,33 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        # ubuntu builds natively against glibc, where layout bugs between
+        # Zig's std structs and libc's show up (see the pty test in
+        # src/term/Terminal.zig)
+        os: [ubuntu-latest, macos-latest]
+        # ReleaseSafe is what releases and the Nix package ship. Its stack
+        # protector catches overflows that Debug builds can hide.
+        optimize: [Debug, ReleaseSafe]
+    name: test (${{ matrix.os }}, ${{ matrix.optimize }})
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+
+      - name: Test
+        run: zig build test -Doptimize=${{ matrix.optimize }} --summary all
