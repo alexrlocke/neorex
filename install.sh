@@ -68,7 +68,7 @@ mv "$tmp/$name" "$dest"
 ln -sf "$dest/bin/neorex" "$bindir/neorex"
 
 echo "installed $bindir/neorex"
-echo "colorscheme and lualine theme: $dest/runtime"
+echo "colorscheme and lualine theme: $dest/share/neorex/runtime"
 case ":$PATH:" in
   *":$bindir:"*) ;;
   *) echo "note: $bindir is not on your PATH" ;;

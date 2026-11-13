@@ -6,6 +6,7 @@ const Terminal = @import("../term/Terminal.zig");
 const Signals = @import("../term/Signals.zig");
 const modes = @import("../term/modes.zig");
 const Nvim = @import("../nvim/Nvim.zig");
+const runtime = @import("../nvim/runtime.zig");
 const Forwarder = @import("../nvim/Forwarder.zig");
 const Grids = @import("../screen/Grids.zig");
 const render = @import("../screen/render.zig");
@@ -26,7 +27,8 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, nvim_args: []const []const u8) !v
 
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
-    try argv.appendSlice(gpa, &.{ "nvim", "--embed" });
+    var cmd_buf: [runtime.cmd_len]u8 = undefined;
+    try argv.appendSlice(gpa, &.{ "nvim", "--embed", "--cmd", try runtime.cmd(io, &cmd_buf) });
     try argv.appendSlice(gpa, nvim_args);
 
     var nvim_buf: [4096]u8 = undefined;

@@ -9,6 +9,7 @@ const input = @import("../term/input.zig");
 const msgpack = @import("../nvim/msgpack.zig");
 const rpc = @import("../nvim/rpc.zig");
 const Nvim = @import("../nvim/Nvim.zig");
+const runtime = @import("../nvim/runtime.zig");
 const Forwarder = @import("../nvim/Forwarder.zig");
 
 // no alternate screen, so the events stay in scrollback
@@ -30,7 +31,8 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, nvim_args: []const []const u8) !v
 
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
-    try argv.appendSlice(gpa, &.{ "nvim", "--embed" });
+    var cmd_buf: [runtime.cmd_len]u8 = undefined;
+    try argv.appendSlice(gpa, &.{ "nvim", "--embed", "--cmd", try runtime.cmd(io, &cmd_buf) });
     try argv.appendSlice(gpa, nvim_args);
 
     var nvim_buf: [4096]u8 = undefined;
