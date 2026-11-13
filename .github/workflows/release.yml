@@ -38,7 +38,7 @@ jobs:
           for target in x86_64-linux-musl aarch64-linux-musl x86_64-macos aarch64-macos; do
             name="neorex-${target%-musl}"
             zig build -Dtarget="$target" -Doptimize=ReleaseSafe -Dstrip --prefix "stage/$name"
-            cp -r runtime LICENSE README.md "stage/$name/"
+            cp LICENSE README.md "stage/$name/"
             tar -C stage -czf "dist/$name.tar.gz" "$name"
           done
           (cd dist && sha256sum neorex-*.tar.gz > checksums.txt)

@@ -71,6 +71,7 @@ test {
     _ = @import("nvim/Nvim.zig");
     _ = @import("nvim/Forwarder.zig");
     _ = @import("nvim/windows.zig");
+    _ = @import("nvim/runtime.zig");
     _ = @import("screen/Grid.zig");
     _ = @import("screen/Grids.zig");
     _ = @import("screen/Style.zig");

@@ -6,6 +6,7 @@
 const std = @import("std");
 const net = std.Io.net;
 const Nvim = @import("../nvim/Nvim.zig");
+const runtime = @import("../nvim/runtime.zig");
 const Client = @import("../rex/Client.zig");
 const rex_server = @import("../rex/server.zig");
 const Loop = @import("loop.zig").Loop;
@@ -77,7 +78,8 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, base: []const u8, nvim_args: []co
 
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
-    try argv.appendSlice(gpa, &.{ "nvim", "--headless", "--listen", nvim_sock });
+    var cmd_buf: [runtime.cmd_len]u8 = undefined;
+    try argv.appendSlice(gpa, &.{ "nvim", "--headless", "--listen", nvim_sock, "--cmd", try runtime.cmd(io, &cmd_buf) });
     try argv.appendSlice(gpa, nvim_args);
     // its stderr is ours: the log
     var child = try std.process.spawn(io, .{ .argv = argv.items, .stdin = .ignore, .stdout = .ignore });

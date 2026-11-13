@@ -24,12 +24,9 @@
           pname = "neorex";
           inherit version;
           src = self;
-          # the hook runs zig build -Doptimize=ReleaseSafe with --prefix $out
+          # the hook runs zig build -Doptimize=ReleaseSafe with --prefix $out,
+          # which also installs share/neorex/runtime
           nativeBuildInputs = [ pkgs.zig_0_17.hook ];
-          postInstall = ''
-            mkdir -p $out/share/neorex
-            cp -r runtime $out/share/neorex/
-          '';
           meta = {
             description = "A Rex-native Neovim frontend built in Zig";
             homepage = "https://github.com/alexrlocke/neorex";

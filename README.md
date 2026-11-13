@@ -38,8 +38,7 @@ curl -fsSL https://raw.githubusercontent.com/alexrlocke/neorex/main/install.sh |
 ```
 
 This puts neorex in `~/.local/share/neorex` and links it from
-`~/.local/bin/neorex`. The colorscheme and lualine theme described below are
-in `~/.local/share/neorex/runtime`. Or download a tarball from the
+`~/.local/bin/neorex`. Or download a tarball from the
 [releases page](https://github.com/alexrlocke/neorex/releases) yourself.
 
 Release tarballs are signed with [minisign](https://jedisct1.github.io/minisign/).
@@ -73,8 +72,7 @@ then either use
 `inputs.neorex.overlays.default` to your nixpkgs overlays and use
 `pkgs.neorex`.
 
-The colorscheme and lualine theme are in the package's
-`share/neorex/runtime`. neorex uses the `nvim` on your `PATH`.
+neorex uses the `nvim` on your `PATH`.
 
 ## Build from source
 
@@ -110,15 +108,16 @@ neorex keeps Neovim in step with Rex's theme:
   drawn as before.
 
 `runtime/` has a colorscheme and a lualine theme, both named `neorex`, made
-only of the 16 palette colors, so Neovim takes on Rex's colors exactly. To
-use them only when Neovim runs in neorex (lazy.nvim / LazyVim shown):
+only of the 16 palette colors, so Neovim takes on Rex's colors exactly.
+neorex installs them beside its binary, in `share/neorex/runtime`, and adds
+them to Neovim's `'runtimepath'` itself, so inside neorex `:colorscheme neorex`
+works with no setup. Before your `init.lua` runs, neorex also sets
+`vim.g.neorex = true`, so your config can use them only when Neovim runs in
+neorex (lazy.nvim / LazyVim shown):
 
 ```lua
--- neorex starts Neovim with `--listen $TMPDIR/neorex-<pid>.nvim.sock`
-local in_neorex = vim.v.servername:match("/neorex%-%d+%.nvim%.sock$") ~= nil
-if in_neorex then
-  vim.opt.rtp:append("/path/to/neorex/runtime")
-end
+-- set by neorex before init.lua runs
+local in_neorex = vim.g.neorex == true
 
 return {
   { "LazyVim/LazyVim", opts = { colorscheme = in_neorex and "neorex" or nil } },
@@ -133,6 +132,21 @@ return {
   },
 }
 ```
+
+lazy.nvim rebuilds `'runtimepath'` in `setup()`, which drops the folder neorex
+added. neorex also sets `vim.g.neorex_runtime` to that folder, so tell
+lazy.nvim to keep it:
+
+```lua
+require("lazy").setup({
+  -- spec = ...,
+  performance = { rtp = { paths = { vim.g.neorex_runtime } } },
+})
+```
+
+Outside neorex `vim.g.neorex_runtime` is unset, and this adds nothing.
+Configs that detect neorex from its socket name (`vim.v.servername`) keep
+working.
 
 Plugins that set their own RGB colors keep them.
 

@@ -17,6 +17,13 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.installArtifact(exe);
+    // the colorscheme and lualine theme; neorex finds them from its own path
+    // (src/nvim/runtime.zig), so every install keeps this layout
+    b.installDirectory(.{
+        .source_dir = b.path("runtime"),
+        .install_dir = .prefix,
+        .install_subdir = "share/neorex/runtime",
+    });
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
