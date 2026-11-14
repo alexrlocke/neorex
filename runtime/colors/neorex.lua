@@ -153,7 +153,7 @@ local groups = {
   WhichKeyNormal = {},
   WhichKeyBorder = { ctermfg = grey },
 
-  -- the `neorex` lualine theme links to these
+  -- statusline: the `neorex` lualine theme and mini.statusline link to these
   NeorexLineNormal = { ctermfg = blue, reverse = true, bold = true },
   NeorexLineInsert = { ctermfg = green, reverse = true, bold = true },
   NeorexLineVisual = { ctermfg = magenta, reverse = true, bold = true },
@@ -163,6 +163,17 @@ local groups = {
   NeorexLineB = { ctermbg = faint },
   NeorexLineC = {},
   NeorexLineInactive = { ctermfg = grey },
+  -- mini.statusline only sets its own defaults where these aren't set
+  MiniStatuslineModeNormal = { link = "NeorexLineNormal" },
+  MiniStatuslineModeInsert = { link = "NeorexLineInsert" },
+  MiniStatuslineModeVisual = { link = "NeorexLineVisual" },
+  MiniStatuslineModeReplace = { link = "NeorexLineReplace" },
+  MiniStatuslineModeCommand = { link = "NeorexLineCommand" },
+  MiniStatuslineModeOther = { link = "NeorexLineTerminal" },
+  MiniStatuslineDevinfo = { link = "NeorexLineB" },
+  MiniStatuslineFilename = { link = "NeorexLineC" },
+  MiniStatuslineFileinfo = { link = "NeorexLineB" },
+  MiniStatuslineInactive = { link = "NeorexLineInactive" },
 }
 
 for name, hl in pairs(groups) do

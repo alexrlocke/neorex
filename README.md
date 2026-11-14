@@ -148,6 +148,9 @@ Outside neorex `vim.g.neorex_runtime` is unset, and this adds nothing.
 Configs that detect neorex from its socket name (`vim.v.servername`) keep
 working.
 
+With mini.statusline instead of lualine, the colorscheme alone is enough: it
+gives mini.statusline the same colors as the lualine theme.
+
 Plugins that set their own RGB colors keep them.
 
 ## Current limitations
