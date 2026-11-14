@@ -1,8 +1,13 @@
 -- neorex: a colorscheme made only of the terminal's 16 palette colors.
 --
--- Every color is a palette index (ctermfg/ctermbg), never RGB, and Normal is
--- left unset, so the terminal draws its own theme's colors. When the theme
--- changes, the colors change with it without a reload.
+-- Every color is a palette index (ctermfg/ctermbg), and Normal is left unset,
+-- so the terminal draws its own theme's colors. When the theme changes, the
+-- colors change with it without a reload.
+--
+-- The one exception is the accent: the theme's cursor color, which neorex
+-- asks the terminal for and keeps in `g:neorex_accent`. It colors
+-- NeorexAccent and the Normal-mode statusline (see lua/neorex/accent.lua).
+-- Without it (outside neorex, or a theme with no cursor color) both are blue.
 --
 -- neorex draws these indices as palette colors with 'termguicolors' on. In
 -- Neovim's own TUI, use it with 'notermguicolors'.
@@ -153,8 +158,8 @@ local groups = {
   WhichKeyNormal = {},
   WhichKeyBorder = { ctermfg = grey },
 
-  -- statusline: the `neorex` lualine theme and mini.statusline link to these
-  NeorexLineNormal = { ctermfg = blue, reverse = true, bold = true },
+  -- statusline: the `neorex` lualine theme and mini.statusline link to
+  -- these, and to NeorexLineNormal, which lua/neorex/accent.lua sets
   NeorexLineInsert = { ctermfg = green, reverse = true, bold = true },
   NeorexLineVisual = { ctermfg = magenta, reverse = true, bold = true },
   NeorexLineReplace = { ctermfg = red, reverse = true, bold = true },
@@ -179,3 +184,4 @@ local groups = {
 for name, hl in pairs(groups) do
   vim.api.nvim_set_hl(0, name, hl)
 end
+require("neorex.accent").apply()
