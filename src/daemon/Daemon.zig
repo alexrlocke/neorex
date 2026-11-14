@@ -360,6 +360,7 @@ fn onNvim(self: *Daemon) !void {
             var params = n.params;
             if (std.mem.eql(u8, n.method, "redraw")) {
                 if (try self.grids.applyRedraw(self.gpa, &params)) {
+                    self.noticeCursorFloat();
                     try self.reconcile();
                     try self.draw();
                 }
@@ -468,6 +469,19 @@ fn onEnteredFloat(self: *Daemon, win: i64) !void {
     try self.reconcileLayers();
     try self.nvim.client.flush();
     try self.draw();
+}
+
+/// The cursor is in a focusable float we weren't told was entered: it was
+/// opened with autocommands off, as fzf-lua does, so no WinEnter said so.
+/// Neovim draws the cursor in the current window regardless, so it counts
+/// as entered, and the next reconcile gives it a floating pane.
+fn noticeCursorFloat(self: *Daemon) void {
+    const w = self.grids.winOn(self.grids.cursor_grid) orelse return;
+    if (w.kind != .float or !w.float.focusable or w.win < 0) return;
+    if (std.mem.indexOfScalar(i64, self.nvim.enteredFloats(), w.win) != null) return;
+    self.nvim.noteEntered(w.win);
+    // so its floating pane takes focus once Rex makes it
+    self.nvim.current_float = w.win;
 }
 
 /// Matches panes to windows: new external windows get panes, ordinary ones
