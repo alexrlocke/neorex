@@ -450,4 +450,8 @@ api.nvim_create_autocmd('WinClosed', {
 local first = api.nvim_get_current_win()
 M.adopt(first, cols, rows)
 schedule_report()
+-- send the window at its new size before the answer: the daemon starts
+-- drawing on the answer, and would draw it at the old size until then, as
+-- wide as the editor when its pane is a split
+pcall(vim.cmd.redraw)
 return { first, anchor_of(api.nvim_get_current_tabpage()) }
