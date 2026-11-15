@@ -36,10 +36,9 @@ pub fn size(nvim: *Nvim, win: i64, cols: u32, rows: u32) !void {
 }
 
 /// Fits the floats hanging from editor floats `tops` to `w` x `h` at `row`,
-/// `col`; `cur` is where they are now: row, col, width, height.
-/// Returns the request's id.
-pub fn placeGroup(nvim: *Nvim, tops: []const i64, row: i32, col: i32, w: u32, h: u32, cur: [4]i64) !u32 {
-    const id = try nvim.execLua("neorex.place_group(...)", 6);
+/// `col`. Returns the request's id: its answer comes after their redraw.
+pub fn placeGroup(nvim: *Nvim, tops: []const i64, row: i32, col: i32, w: u32, h: u32) !u32 {
+    const id = try nvim.execLua("neorex.place_group(...)", 5);
     const wr = nvim.writer();
     try msgpack.writeArrayHeader(wr, @intCast(tops.len));
     for (tops) |t| try msgpack.writeInt(wr, t);
@@ -47,8 +46,6 @@ pub fn placeGroup(nvim: *Nvim, tops: []const i64, row: i32, col: i32, w: u32, h:
     try msgpack.writeInt(wr, col);
     try msgpack.writeInt(wr, @max(w, 1));
     try msgpack.writeInt(wr, @max(h, 1));
-    try msgpack.writeArrayHeader(wr, 4);
-    for (cur) |v| try msgpack.writeInt(wr, v);
     return id;
 }
 

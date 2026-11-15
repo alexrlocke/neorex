@@ -5,10 +5,12 @@ A Rex-Native Neovim frontend built in Zig.
 One Neovim runs in the background behind all your panes, so buffers,
 registers, undo and language servers are shared. `:split` and `:vsplit` open
 real Rex panes where Neovim would put the window, and closing a pane in Rex
-closes its window. Focusable floats, such as pickers, open in Rex floating
-panes, along with any floats attached to them. The completion menu,
-unfocusable floats like notifications, and statuslines are drawn inside the
-pane they belong to.
+closes its window. A popup is drawn either in the focused pane or in a Rex
+floating pane, never anything in between. Floats on the whole editor that
+you go into, such as pickers, and ones you can't go into, such as
+which-key and notifications, open in Rex floating panes, along with any
+floats attached to them. The completion menu, floats at the cursor or on a
+window, and statuslines are drawn inside the pane they belong to.
 
 ![neorex demo](assets/demo.gif)
 

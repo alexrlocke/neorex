@@ -20,6 +20,8 @@ const Request = union(enum) {
     disown_block,
     close_block,
     close_layer,
+    resize_layer: u32, // pane
+    resize_terminal,
     set_block_label,
     set_window_label,
 };
@@ -70,6 +72,9 @@ pub const Update = union(enum) {
     layer_made: struct { pane: u32, block: []const u8, layer: ?[]const u8 },
     /// Rex refused the floating layer asked for this pane.
     layer_failed: Failed,
+    /// Rex answered a move or resize of this pane's floating layer, done or
+    /// refused: views from now on show its bounds as they are.
+    layer_resized: u32,
     /// A newer view's windows, to read where our panes sit.
     layout: []const std.json.Value,
     /// The user focused this block in Rex.
@@ -151,6 +156,23 @@ pub fn closeLayer(self: *Session, layer: []const u8) !void {
     try self.request(.close_layer, "session.close_layer", .{ .session_id = self.session_id, .layer_id = layer });
 }
 
+/// Moves or resizes a floating layer we made to `bounds`, fractions of the
+/// window. Its terminal keeps its size: see `resizeTerminal`.
+pub fn resizeLayer(self: *Session, pane_id: u32, layer: []const u8, bounds: [4]f64) !void {
+    try self.request(.{ .resize_layer = pane_id }, "session.resize_layer", .{ .session_id = self.session_id, .layer_id = layer, .bounds = bounds });
+}
+
+/// Asks for a terminal block's size. Rex applies it at once when no app
+/// owns the block, as with a floating pane no app took; an app that owns it
+/// sizes it itself, and this waits unused.
+pub fn resizeTerminal(self: *Session, block: []const u8, cols: u32, rows: u32) !void {
+    try self.request(.resize_terminal, "com.superlogical.terminal.resize", .{
+        .session_id = self.session_id,
+        .block_id = block,
+        .args = .{ .columns = @max(cols, 1), .rows = @max(rows, 1) },
+    });
+}
+
 /// Sets a block's label; an empty one restores Rex's default.
 pub fn setBlockLabel(self: *Session, block: []const u8, label: []const u8) !void {
     try self.request(.set_block_label, "session.set_block_label", .{ .session_id = self.session_id, .block_id = block, .label = label });
@@ -201,7 +223,8 @@ pub fn onResponse(self: *Session, res: Client.Response) !?Update {
         .focus_block => try self.onFocusBlockResult(res.result),
         .attach => try self.onAttachResult(res.result),
         .set_window_label => self.onSetWindowLabelResult(res.result),
-        .disown_block, .close_block, .close_layer, .set_block_label, .resize_pane => {},
+        .resize_layer => |pane| return .{ .layer_resized = pane },
+        .disown_block, .close_block, .close_layer, .resize_terminal, .set_block_label, .resize_pane => {},
     }
     return null;
 }

@@ -21,7 +21,9 @@ closing: ?Close = null,
 layer: ?Layer = null,
 /// Where Rex put the pane in its window, as fractions: x, y, w, h.
 rect: ?[4]f64 = null,
-/// A new split's terminal starts at Rex's default size: keep the guessed window size until the app's first resize.
+/// Waiting on its terminal's size. A new split's starts at Rex's default,
+/// so it keeps its guessed window size until the app's first resize; a
+/// floating pane we asked Rex to resize isn't drawn until the size comes.
 awaiting_layout: bool = false,
 last_asked_win_size: struct { grid: u32 = 0, cols: u32 = 0, rows: u32 = 0 } = .{},
 /// What it's named: its window's file name; owned.
@@ -40,24 +42,28 @@ pub const rexBlock = ids.block;
 pub const RexLayer = ids.Layer;
 pub const rexLayer = ids.layer;
 
-pub const Fit = union(enum) {
-    none,
-    /// The request's id.
-    asked: u32,
-    /// Answered: the next flush has the new layout.
-    answered,
-};
-
 pub const Layer = struct {
     group: FloatGroups.Group,
     /// Rex's id for it, once made.
     id: ?RexLayer = null,
-    /// Its floats being refitted to its first size: not drawn until Neovim
-    /// has answered and redrawn them, so the guessed size never shows.
-    fit: Fit = .none,
+    /// The refit request its floats wait on: not drawn until Neovim answers,
+    /// by when it has redrawn them, so a size they don't fit never shows.
+    fit: ?u32 = null,
     /// Where it sits in the window, as fractions: x, y, w, h. What we asked
     /// for, until the user moves it.
     bounds: [4]f64 = .{ 0, 0, 0, 0 },
+    /// The group's box when it was last refitted or asked to be. Its floats
+    /// are fitted again only when they move off it on their own, as
+    /// which-key's do on every key: so a refit that lands short, or floats
+    /// that can't be refitted, as Telescope's, are never asked again and again.
+    settled: [4]i64 = .{ 0, 0, 0, 0 },
+    /// The user moved or resized it in Rex: its size is theirs, and its
+    /// floats asking for another are refused, fitted back to it instead.
+    user_placed: bool = false,
+    /// Moves or resizes we asked Rex for, its making included, not answered
+    /// yet: views until then may show its bounds from before, which aren't
+    /// the user's doing.
+    bounds_asked: u8 = 0,
 };
 
 pub const Close = enum {
@@ -98,7 +104,8 @@ pub fn drawable(self: Pane) bool {
 
 /// A floating pane ready to draw its floats.
 pub fn layerShown(self: Pane) bool {
-    return self.layer != null and self.terminal_surface != null and self.closing == null and self.layer.?.fit == .none;
+    const l = self.layer orelse return false;
+    return self.terminal_surface != null and self.closing == null and l.fit == null and !self.awaiting_layout;
 }
 
 /// A floating pane shown or on its way: its floats stay out of other panes.
