@@ -1,5 +1,6 @@
 //! The running daemon: Neovim, its grids, the Rex connection, a pane per
-//! window and a floating pane per group of floats that took focus. After
+//! window and a floating pane per group of editor floats that took focus or
+//! can't (see FloatGroups). After
 //! each Neovim flush, `reconcile` gives new windows and float groups panes
 //! and hangs up panes whose windows closed; then every pane is drawn.
 // TODO: Needs a pretty major rewrite
@@ -10,7 +11,6 @@ const Allocator = std.mem.Allocator;
 const input = @import("../term/input.zig");
 const Nvim = @import("../nvim/Nvim.zig");
 const msgpack = @import("../nvim/msgpack.zig");
-const rpc = @import("../nvim/rpc.zig");
 const windows = @import("../nvim/windows.zig");
 const Forwarder = @import("../nvim/Forwarder.zig");
 const Grids = @import("../screen/Grids.zig");
@@ -194,20 +194,19 @@ fn accept(self: *Daemon, server: *net.Server) !void {
         } else try self.addTimer(.layout_timer, layout_wait_ms);
     }
     try self.sizeWindow(pane);
-    if (pane.layer) |*l| if (try self.followLayer(pane)) |req| {
-        l.fit = .{ .asked = req };
-    };
+    if (pane.layer != null) try self.refit(pane);
     try self.nvim.client.flush();
     try self.draw();
 }
 
-/// The app never resized a new split: its terminal's size is the real one.
+/// The app never resized a new split, or Rex a floating pane we asked it
+/// to: its terminal's size is the real one.
 fn layoutWaitOver(self: *Daemon) !void {
     var any = false;
     for (self.panes.list.items) |*p| if (p.awaiting_layout and p.terminal_surface != null) {
         p.awaiting_layout = false;
         any = true;
-        try self.sizeWindow(p);
+        if (p.layer != null) try self.refit(p) else try self.sizeWindow(p);
     };
     if (!any) return;
     try self.nvim.client.flush();
@@ -245,7 +244,8 @@ fn handleResize(self: *Daemon, pane: *Pane) !void {
     pane.awaiting_layout = false;
     surface.view.resize(window_size.col, window_size.row);
     try self.sizeWindow(pane);
-    _ = try self.followLayer(pane);
+    // whatever Rex gave, asked for or not: the floats fit it
+    if (pane.layer != null) try self.refit(pane);
     if (pane == self.focusedPane()) try self.nvim.fitUiTo(pane);
     try self.nvim.client.flush();
     try self.draw();
@@ -380,12 +380,12 @@ fn onNvim(self: *Daemon) !void {
             var result = r.result;
             if (r.id == self.nvim.current_win_req) self.nvim.current_win_req = null;
             var show_now = false;
-            for (self.panes.list.items) |*p| if (p.layer) |*l| if (l.fit == .asked and l.fit.asked == r.id) {
-                // nothing moved, so no redraw is coming: show it now
-                var res = r.result;
-                const moved = r.err == null and (rpc.expectBool(&res) catch false);
-                l.fit = if (moved) .answered else .none;
-                show_now = !moved;
+            for (self.panes.list.items) |*p| if (p.layer) |*l| if (l.fit == r.id) {
+                // the refit redraws before it answers (`place_group`), so
+                // the floats are where it left them: settled, and shown
+                l.fit = null;
+                l.settled = l.group.box;
+                show_now = true;
             };
             if (show_now) try self.draw();
             if (r.err) |e| {
@@ -474,10 +474,6 @@ fn onEnteredFloat(self: *Daemon, win: i64) !void {
 /// are made external, and panes whose windows closed hang up.
 fn reconcile(self: *Daemon) !void {
     if (!self.nvim.ready) return;
-    // this flush has the refitted floats
-    for (self.panes.list.items) |*p| if (p.layer) |*l| if (l.fit == .answered) {
-        l.fit = .none;
-    };
     var i = self.panes.list.items.len;
     while (i > 0) {
         i -= 1;
@@ -586,6 +582,9 @@ fn onRex(self: *Daemon) !void {
             p.closing = .request_failed;
         },
         .layer_made => |made| try self.onLayerMade(made.pane, made.block, made.layer),
+        .layer_resized => |id| if (self.panes.byId(id)) |p| if (p.layer) |*l| {
+            l.bounds_asked -|= 1;
+        },
         .layout => |wins| try self.onLayout(wins),
         .focus_moved => |block| try self.onRexFocus(block),
     };
@@ -617,6 +616,7 @@ fn onLayerMade(self: *Daemon, pane_id: u32, block: []const u8, layer: ?[]const u
     try self.rex.disown(block);
     const l = &p.layer.?;
     if (layer) |id| l.id = Pane.rexLayer(id) catch null;
+    l.bounds_asked -|= 1;
     if (self.nvim.current_float != 0 and self.layerOfWin(self.nvim.current_float) == p) try self.rex.focus(p.rex_block);
 }
 
@@ -669,20 +669,24 @@ fn readLayout(self: *Daemon, wins: []const std.json.Value) !void {
 }
 
 /// A floating layer of ours somewhere else: the user moved it, so its
-/// floats follow.
+/// floats follow, and from now on its size is theirs.
 fn onLayerBounds(self: *Daemon, block: []const u8, bounds: layout.Rect) void {
     const p = self.panes.byBlock(block) orelse return;
     const l = if (p.layer) |*l| l else return;
+    // a view from before Rex did what we asked
+    if (l.bounds_asked > 0) return;
     if (self.sameBounds(bounds, l.bounds)) return;
     l.bounds = bounds;
-    _ = self.followLayer(p) catch {};
+    l.user_placed = true;
+    self.sizeLayer(p, self.layerSize(bounds)) catch {};
 }
 
 // floating panes
 
 /// Matches floating panes to groups of floats: new groups get one, and
-/// those whose group closed hang up. A floating pane's size is Rex's: it's
-/// never moved to follow its floats, they follow it.
+/// those whose group closed hang up. A floating pane opens at the size its
+/// floats ask for, then its size is Rex's: when they ask again, Rex may
+/// grant it (`onFloatsMoved`), and either way they fit what Rex gives.
 fn reconcileLayers(self: *Daemon) !void {
     var buf: [FloatGroups.max_groups]FloatGroups.Group = undefined;
     const groups = if (self.rex.conn != .closed) FloatGroups.find(&self.grids, self.nvim.enteredFloats(), &buf) else buf[0..0];
@@ -701,40 +705,111 @@ fn reconcileLayers(self: *Daemon) !void {
             continue;
         };
         l.group = g.*;
+        // Floats that move or resize themselves, as which-key's do on every
+        // key, ask for the pane's size again. Once per move of their own:
+        // where a refit lands, even if not quite where asked, is settled,
+        // so this never chases itself.
+        if (l.fit == null and !std.mem.eql(i64, &l.group.box, &l.settled)) {
+            l.settled = l.group.box;
+            try self.onFloatsMoved(p);
+        }
     }
     for (groups) |g| {
         if (self.panes.byLayerKey(g.key) == null) try self.newLayer(g);
     }
 }
 
-/// Bounds for a floating pane around `g`, as fractions of the window,
-/// leaving room for the frame Rex draws around it.
+/// A floating pane's floats moved or resized themselves: a request for
+/// another size and place, which Rex grants as far as the window allows,
+/// unless the user placed the pane. Either way the floats end up fitting
+/// the pane Rex gives, and nothing is drawn until then.
+fn onFloatsMoved(self: *Daemon, p: *Pane) !void {
+    const l = &p.layer.?;
+    // the user's size wins; and until Rex has made it, there's nothing to ask
+    if (l.user_placed or l.id == null or p.rex_block == null) return self.refit(p);
+    const bounds = self.layerBounds(l.group) orelse return self.refit(p);
+    if (!self.sameBounds(bounds, l.bounds)) {
+        try self.rex.resizeLayer(p.id, &l.id.?, bounds);
+        l.bounds = bounds;
+        l.bounds_asked += 1;
+    }
+    try self.sizeLayer(p, self.layerSize(bounds));
+}
+
+/// Gives a floating pane's terminal `size` and fits its floats to it. No
+/// app sizes that terminal (none owns it), so we ask Rex, and the floats fit
+/// once it says its size (`handleResize`), or once the wait is over.
+fn sizeLayer(self: *Daemon, p: *Pane, size: [2]u32) !void {
+    const s = p.terminal_surface orelse return;
+    if (s.view.cols == size[0] and s.view.rows == size[1]) return self.refit(p);
+    try self.rex.resizeTerminal(&p.rex_block.?, size[0], size[1]);
+    p.awaiting_layout = true;
+    try self.addTimer(.layout_timer, layout_wait_ms);
+}
+
+/// Fits a floating pane's floats to it, holding it back until they do.
+fn refit(self: *Daemon, p: *Pane) !void {
+    if (try self.followLayer(p)) |req| p.layer.?.fit = req;
+}
+
+/// Bounds for a floating pane on `g`, as fractions of the window: the cells
+/// its floats asked for, with the frame Rex draws inside them, so it covers
+/// nothing they kept clear of, such as the statusline under which-key. Too
+/// small to hold the frame and a cell, as a one-line notification is, it
+/// grows evenly around them.
 fn layerBounds(self: *const Daemon, g: FloatGroups.Group) ?[4]f64 {
     const screen = self.grids.get(1) orelse return null;
     if (screen.width == 0 or screen.height == 0) return null;
     const sw: f64 = @floatFromInt(screen.width);
     const sh: f64 = @floatFromInt(screen.height);
-    const fw = layer_frame[0];
-    const fh = layer_frame[1];
-    const w = @min(@as(f64, @floatFromInt(@as(i64, g.width) + fw)) / sw, 1);
-    const h = @min(@as(f64, @floatFromInt(@as(i64, g.height) + fh)) / sh, 1);
-    const x = std.math.clamp(@as(f64, @floatFromInt(g.col - @divFloor(fw, 2))) / sw, 0, 1 - w);
-    const y = std.math.clamp(@as(f64, @floatFromInt(g.row - @divFloor(fh, 2))) / sh, 0, 1 - h);
+    const b = g.box;
+    const cells_w = @max(b[2], layer_frame[0] + 1);
+    const cells_h = @max(b[3], layer_frame[1] + 1);
+    const w = @min(@as(f64, @floatFromInt(cells_w)) / sw, 1);
+    const h = @min(@as(f64, @floatFromInt(cells_h)) / sh, 1);
+    const col = b[1] - @divFloor(cells_w - b[2], 2);
+    const row = b[0] - @divFloor(cells_h - b[3], 2);
+    const x = std.math.clamp(@as(f64, @floatFromInt(col)) / sw, 0, 1 - w);
+    const y = std.math.clamp(@as(f64, @floatFromInt(row)) / sh, 0, 1 - h);
     return .{ x, y, w, h };
+}
+
+/// The terminal size, cols x rows, inside a floating pane at `bounds`: its
+/// cells on grid 1, less the frame Rex draws around it.
+fn layerSize(self: *const Daemon, bounds: [4]f64) [2]u32 {
+    const screen = self.grids.get(1) orelse return sizing.rex_default_size;
+    const cells = [2]i64{
+        @intFromFloat(@round(bounds[2] * @as(f64, @floatFromInt(screen.width)))),
+        @intFromFloat(@round(bounds[3] * @as(f64, @floatFromInt(screen.height)))),
+    };
+    return .{ @intCast(@max(cells[0] - layer_frame[0], 1)), @intCast(@max(cells[1] - layer_frame[1], 1)) };
 }
 
 fn newLayer(self: *Daemon, g: FloatGroups.Group) !void {
     const bounds = self.layerBounds(g) orelse return;
     const pane = try self.panes.addForGroup(self.gpa, g);
     pane.layer.?.bounds = bounds;
+    // until Rex makes it, views don't show where it is
+    pane.layer.?.bounds_asked = 1;
     const pane_id = pane.id;
+    const size = self.layerSize(bounds);
 
     var id_buf: [16]u8 = undefined;
     const id = try std.fmt.bufPrint(&id_buf, "{d}", .{pane_id});
     try self.rex.newLayer(pane_id, bounds, .{ .block = .{
         .flavor = "com.superlogical.terminal.shell",
         .label = "neorex",
-        .options = .{ .shell = "none", .command = &[_][]const u8{ self.exe, "pane", self.sock, id } },
+        .options = .{
+            .shell = "none",
+            // a login session prints "Last login" before the pane draws
+            .login = false,
+            .command = &[_][]const u8{ self.exe, "pane", self.sock, id },
+            // the size it shows at: no Rex app sizes a floating pane's
+            // terminal (the block has no owner once we disown it), so
+            // without this it stays 80x24, and Rex shows only the top left
+            // of one bigger than the pane, as which-key's
+            .size = .{ .columns = size[0], .rows = size[1] },
+        },
     } });
 }
 
@@ -752,18 +827,25 @@ fn followLayer(self: *Daemon, p: *Pane) !?u32 {
     const l = if (p.layer) |*l| l else return null;
     const s = p.terminal_surface orelse return null;
     const screen = self.grids.get(1) orelse return null;
-    const row: i32 = @as(i32, @intFromFloat(@round(l.bounds[1] * @as(f64, @floatFromInt(screen.height))))) + @divFloor(layer_frame[1], 2);
-    const col: i32 = @as(i32, @intFromFloat(@round(l.bounds[0] * @as(f64, @floatFromInt(screen.width))))) + @divFloor(layer_frame[0], 2);
+    if (screen.width == 0 or screen.height == 0) return null;
+    // somewhere on the screen, or Neovim moves the floats back onto it and
+    // they never get there
+    const w = @min(s.view.cols, screen.width);
+    const h = @min(s.view.rows, screen.height);
+    const at_row: i32 = @as(i32, @intFromFloat(@round(l.bounds[1] * @as(f64, @floatFromInt(screen.height))))) + @divFloor(layer_frame[1], 2);
+    const at_col: i32 = @as(i32, @intFromFloat(@round(l.bounds[0] * @as(f64, @floatFromInt(screen.width))))) + @divFloor(layer_frame[0], 2);
+    const row = std.math.clamp(at_row, 0, @as(i32, @intCast(screen.height - h)));
+    const col = std.math.clamp(at_col, 0, @as(i32, @intCast(screen.width - w)));
     const g = l.group;
-    if (row == g.row and col == g.col and s.view.cols == g.width and s.view.rows == g.height) return null;
+    if (std.mem.eql(i64, &g.box, &.{ row, col, w, h })) return null;
     var wins: [16]i64 = undefined;
     var n: usize = 0;
-    for (g.topGrids()) |top| if (self.grids.winOn(top)) |w| {
-        wins[n] = w.win;
+    for (g.topGrids()) |top| if (self.grids.winOn(top)) |on| {
+        wins[n] = on.win;
         n += 1;
     };
     if (n == 0) return null;
-    return try windows.placeGroup(self.nvim.client, wins[0..n], row, col, s.view.cols, s.view.rows, .{ g.row, g.col, g.width, g.height });
+    return try windows.placeGroup(self.nvim.client, wins[0..n], row, col, w, h);
 }
 
 /// The floating pane showing float `win`, if one does.
@@ -807,13 +889,19 @@ fn draw(self: *Daemon) !void {
         // backwards, so removing this pane leaves the ones still to draw in place
         const p = &self.panes.list.items[i];
         const s = p.terminal_surface orelse continue;
-        // a floating pane waiting on its refit shows nothing yet
-        if (p.layer != null and !p.layerShown()) continue;
+        // a floating pane waiting on its refit shows nothing yet; what
+        // changes meanwhile is marked drawn below, so it draws whole once shown
+        if (p.layer != null and !p.layerShown()) {
+            s.view.full = true;
+            continue;
+        }
         const drawn = if (p.layer) |*l| blk: {
             var mbuf: [Grids.max_floats]Grids.Placed = undefined;
             const members = FloatGroups.members(&self.grids, &l.group, &mbuf);
             s.forwarder.grid = if (members.len > 0) members[0].grid else 1;
-            break :blk s.view.frameFloats(&self.grids, members, .{ l.group.row, l.group.col }, &s.terminal.writer) catch false;
+            // the terminal's top left is where its editor floats start
+            const origin = [2]i32{ @intCast(l.group.box[0]), @intCast(l.group.box[1]) };
+            break :blk s.view.frameFloats(&self.grids, members, origin, &s.terminal.writer) catch false;
         } else s.view.frame(&self.grids, self.gridOfPane(p), .{
             .focused = p == focused,
             .origin = self.paneOrigin(p),

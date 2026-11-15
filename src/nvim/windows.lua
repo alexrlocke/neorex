@@ -170,11 +170,50 @@ function M.close(win)
   if api.nvim_win_is_valid(win) then pcall(api.nvim_win_close, win, true) end
 end
 
+--- The cells a float's `border` takes: top, right, bottom, left. Neovim
+--- gives it back as "none" or all 8 parts, from the top left clockwise; a
+--- part may be a { char, highlight } pair, and an empty char takes no cell.
+local function border_edges(b)
+  if type(b) ~= 'table' then return 0, 0, 0, 0 end
+  local function side(i)
+    local p = b[i]
+    if type(p) == 'table' then p = p[1] end
+    return p ~= '' and 1 or 0
+  end
+  return side(2), side(4), side(6), side(8)
+end
+
+--- Floats placed on float `win`, as which-key's footer line is on its box,
+--- kept with it when it's resized from `old_w` x `old_h` to `w` x `h`: one
+--- against its bottom or right edge stays against it, one as wide as it
+--- stays as wide, and none reaches past it. Otherwise they'd stick out of
+--- the floating pane, which then asks to grow.
+local function carry_hanging(win, old_w, old_h, w, h)
+  for _, m in ipairs(api.nvim_list_wins()) do
+    local ok, mc = pcall(api.nvim_win_get_config, m)
+    if ok and mc.relative == 'win' and mc.win == win then
+      local mrow, mcol, mw, mh = mc.row, mc.col, mc.width, mc.height
+      if mrow + mh >= old_h then mrow = mrow + h - old_h end
+      if mw >= old_w then
+        mw = w
+      elseif mcol + mw >= old_w then
+        mcol = mcol + w - old_w
+      end
+      mw = math.max(1, math.min(mw, w))
+      mh = math.max(1, math.min(mh, h))
+      mrow = math.max(0, math.min(mrow, h - mh))
+      mcol = math.max(0, math.min(mcol, w - mw))
+      pcall(api.nvim_win_set_config, m, { relative = 'win', win = win, row = mrow, col = mcol, width = mw, height = mh })
+    end
+  end
+end
+
 --- Fits the floats hanging from editor floats `tops` to `w` x `h` at `row`,
---- `col` on the screen, as their Rex floating pane was resized to. `cur` is
---- where they are now: row, col, width, height. Returns whether it moved
---- anything.
-function M.place_group(tops, row, col, w, h, cur)
+--- `col` on the screen, as their Rex floating pane was resized to. Anything
+--- it moves is redrawn before it returns, so its answer comes after the
+--- redraw. A plugin waiting on a key, as which-key does in getchar(), would
+--- otherwise have Neovim send the new size but not what is in it.
+function M.place_group(tops, row, col, w, h)
   local set = {}
   for _, t in ipairs(tops) do set[t] = true end
   -- a snacks picker lays itself out again from its root box's size
@@ -186,23 +225,29 @@ function M.place_group(tops, row, col, w, h, cur)
         local o = l.opts.layout
         o.width, o.height, o.row, o.col = w, h, row, col
         l:update()
-        return true
+        pcall(vim.cmd.redraw)
+        return
       end
     end
   end
-  -- one float on its own grows by what its pane grew
-  if #tops ~= 1 or not api.nvim_win_is_valid(tops[1]) then return false end
+  -- one float on its own: set where it goes outright. Not by how far it is
+  -- from there: Neovim keeps a float on the screen, so where it shows can
+  -- differ from its config, and moving the config by that much never lands.
+  if #tops ~= 1 or not api.nvim_win_is_valid(tops[1]) then return end
   local win = tops[1]
   local c = api.nvim_win_get_config(win)
-  if c.relative ~= 'editor' then return false end
-  api.nvim_win_set_config(win, {
-    relative = 'editor',
-    row = c.row + row - cur[1],
-    col = c.col + col - cur[2],
-    width = math.max(1, c.width + w - cur[3]),
-    height = math.max(1, c.height + h - cur[4]),
-  })
-  return true
+  if c.relative ~= 'editor' then return end
+  local top, right, bottom, left = border_edges(c.border)
+  local inner_w = math.max(1, w - left - right)
+  local inner_h = math.max(1, h - top - bottom)
+  local anchor = c.anchor or 'NW'
+  -- the config names the corner at its anchor, its border included
+  local r = anchor:sub(1, 1) == 'S' and row + inner_h + top + bottom or row
+  local cl = anchor:sub(2, 2) == 'E' and col + inner_w + left + right or col
+  if c.row == r and c.col == cl and c.width == inner_w and c.height == inner_h then return end
+  api.nvim_win_set_config(win, { relative = 'editor', row = r, col = cl, width = inner_w, height = inner_h })
+  carry_hanging(win, c.width, c.height, inner_w, inner_h)
+  pcall(vim.cmd.redraw)
 end
 
 -- neo-tree counts external windows as floats, so it never opens a file in one
