@@ -275,6 +275,22 @@ else
   end
 end
 
+-- win_gettype() says 'popup' for external windows, which here are the
+-- ordinary ones, so plugins that skip popups skip every window: lualine
+-- never refreshes their statuslines. Say '' for them instead, to Lua
+-- callers; Vimscript's win_gettype() is Neovim's own.
+local win_gettype = vim.fn.win_gettype
+vim.fn.win_gettype = function(nr, ...)
+  local t = win_gettype(nr, ...)
+  if t ~= 'popup' then return t end
+  -- {nr} is a window number or a window ID, the current window when left out
+  local win = (nr == nil or nr == 0) and api.nvim_get_current_win() or nr
+  if win < 1000 then win = vim.fn.win_getid(win) end
+  local ok, c = pcall(api.nvim_win_get_config, win)
+  if ok and c.external then return '' end
+  return t
+end
+
 -- the layout node holding `win`: 'row' or 'col', and whether `win` is first
 local function placement(win)
   local p = parent_of(win)
@@ -401,6 +417,24 @@ api.nvim_create_autocmd('OptionSet', {
   pattern = { 'statusline', 'laststatus' },
   callback = function() vim.schedule(refit) end,
 })
+
+-- With laststatus=3 Neovim draws one statusline on its own grid, which no
+-- pane shows, and none on external windows. 2 gives each pane its window's
+-- statusline. lualine sets 3 again whenever it sets itself up, and an
+-- OptionSet callback can't change the option it's for, so this waits a tick.
+-- OptionSet doesn't fire during startup: VimEnter catches an init.lua's.
+local function no_global_statusline()
+  if vim.go.laststatus == 3 then vim.go.laststatus = 2 end
+end
+api.nvim_create_autocmd('OptionSet', {
+  group = group,
+  pattern = 'laststatus',
+  callback = function() vim.schedule(no_global_statusline) end,
+})
+if vim.v.vim_did_enter == 0 then
+  api.nvim_create_autocmd('VimEnter', { group = group, once = true, callback = no_global_statusline })
+end
+no_global_statusline()
 
 -- each pane keeps 'cmdheight' rows for the command line: tell the daemon
 -- now and when it changes, so 0 lets the window reach the pane's bottom

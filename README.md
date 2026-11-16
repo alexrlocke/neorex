@@ -164,8 +164,8 @@ Plugins that set their own RGB colors keep them.
 - Only one tab page: Neovim tab pages aren't Rex tabs.
 - No external command line or messages: long messages still show
   "Press ENTER".
-- No global statusline: with `laststatus=3`, each pane still shows its own
-  statusline.
+- No global statusline: neorex sets `laststatus=3` to `2`, so each pane shows
+  its own window's statusline. Neovim draws none on neorex's windows with `3`.
 
 ## Plans
 
