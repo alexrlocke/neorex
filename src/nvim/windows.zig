@@ -707,6 +707,56 @@ test "each window shows a statusline inside its pane" {
             return gridHeight(x, x.wins[0]) == 9 and rowStarts(x, x.wins[0], 8, "MINE");
         }
     }.f));
+
+    // laststatus=3 would draw no statusline in any pane: it becomes 2
+    try h.input(":setlocal statusline= | set laststatus=0<CR>");
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return gridHeight(x, x.wins[0]) == 9 and rowStarts(x, x.wins[0], 8, "~");
+        }
+    }.f));
+    try h.input(":set laststatus=3<CR>");
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return gridHeight(x, x.wins[0]) == 9 and rowStarts(x, x.wins[0], 8, "OTHER");
+        }
+    }.f));
+    try h.input(":put! =&laststatus<CR>");
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return rowStarts(x, x.wins[0], 0, "2 ");
+        }
+    }.f));
+}
+
+test "to Lua, a window a pane shows isn't a popup" {
+    var buf: [1024]u8 = undefined;
+    var h: Harness = .{ .nvim = Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n" }, &buf) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    } };
+    defer h.deinit();
+    try h.nvim.uiAttach(40, 10, .{ .ext_multigrid = true });
+    h.chan_id = try askChannel(&h.nvim);
+    try h.nvim.flush();
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return x.wins[0] != 0 and gridHeight(x, x.wins[0]) == 9;
+        }
+    }.f));
+
+    // the external window, by no argument, window ID and window number; a
+    // float stays a popup
+    try h.input(":lua local f = vim.api.nvim_open_win(vim.api.nvim_create_buf(false, true), false, " ++
+        "{ relative = 'editor', row = 0, col = 0, width = 5, height = 1 }) " ++
+        "local t = vim.fn.win_gettype " ++
+        "vim.api.nvim_buf_set_lines(0, 0, 0, false, { '[' .. t() .. '|' .. t(vim.api.nvim_get_current_win()) .. " ++
+        "'|' .. t(vim.fn.winnr()) .. '|' .. t(f) .. ']' })<CR>");
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return rowStarts(x, x.wins[0], 0, "[|||popup]");
+        }
+    }.f));
 }
 
 fn lastCmdheight(h: *const Harness) ?u32 {
