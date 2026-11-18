@@ -463,6 +463,9 @@ if vim.v.vim_did_enter == 0 then
 end
 report_options()
 
+-- keep Rex's copy of neorex's actions (runtime/rex/neorex.lua) current
+pcall(function() require('neorex.prompt').install() end)
+
 -- Sets the options while Neovim runs: vim.g.neorex_config can't tell anyone
 -- it changed.
 function M.configure(config)

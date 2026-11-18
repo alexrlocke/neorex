@@ -419,11 +419,23 @@ fn onOptions(self: *Daemon, params: *msgpack.Decoder) !void {
     if (problems.end > 0) try warn(self.nvim.client, problems.buffered());
     var effects: [Options.max_effects]Options.Effect = undefined;
     for (Options.diff(self.options, new, &effects)) |e| switch (e) {
+        .vim_ui => |v| try setVimUi(self.nvim.client, @tagName(v.func), v.surface == .rex),
         // each comes with the feature it turns on
-        .ui_option, .vim_ui, .palette => {},
+        .ui_option, .palette => {},
     };
     self.options = new;
     try self.nvim.client.flush();
+}
+
+/// Hands `vim.ui.<func>` to Rex's palette, or gives back what it replaced.
+/// Without neorex's runtime on 'runtimepath' there's nothing to hand it to.
+fn setVimUi(nvim: *Nvim, func: []const u8, rex: bool) !void {
+    _ = try nvim.execLua(
+        \\local ok, ui = pcall(require, 'neorex.ui')
+        \\if ok then ui.set(...) end
+    , 2);
+    try msgpack.writeStr(nvim.writer(), func);
+    try msgpack.writeBool(nvim.writer(), rex);
 }
 
 /// Shows `lines`, one problem each, as a warning in Neovim.

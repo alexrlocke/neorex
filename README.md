@@ -155,6 +155,47 @@ gives mini.statusline the same colors as the lualine theme.
 
 Plugins that set their own RGB colors keep them.
 
+## Pickers in Rex's command palette
+
+neorex can ask questions in Rex's command palette instead of in Neovim:
+`vim.ui.select` (LSP code actions and many plugins), `vim.ui.input` (LSP
+rename), and pickers for buffers and files. When Rex can't ask, for
+example when no Rex app is open, Neovim asks as usual.
+
+Rex only lets an action from its own config ask a question, so this needs one
+line in Rex's config, `~/.config/rex/init.lua`:
+
+```lua
+pcall(dofile, os.getenv("HOME") .. "/.local/state/neorex/rex.lua")
+```
+
+neorex writes that file each time it starts and has Rex reload it when it
+changes, so it always matches the neorex you run.
+
+The `vim.ui` replacements are off until you turn them on:
+
+```lua
+vim.g.neorex_config = {
+  ui = { select = "rex", input = "rex" },
+}
+```
+
+To change them while Neovim runs, call `neorex.configure({ ... })`. A plugin that replaces
+`vim.ui.select` after neorex does (dressing.nvim, snacks.nvim,
+telescope-ui-select) wins; turn its replacement off to use Rex's.
+
+The pickers need no setting. Map them like any other:
+
+```lua
+if vim.g.neorex then
+  vim.keymap.set("n", "<leader>fb", function() require("neorex.pick").buffers() end)
+  vim.keymap.set("n", "<leader>ff", function() require("neorex.pick").files() end)
+end
+```
+
+`files` lists git's files, or ripgrep's outside a repository. Rex shows at
+most 2,000 items: a longer list shows its first 2,000.
+
 ## Current limitations
 
 - The `<C-w>` resize, swap and move commands do nothing. Use Rex's own pane
