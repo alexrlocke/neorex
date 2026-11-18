@@ -6,11 +6,11 @@ One Neovim runs in the background behind all your panes, so buffers,
 registers, undo and language servers are shared. `:split` and `:vsplit` open
 real Rex panes where Neovim would put the window, and closing a pane in Rex
 closes its window. A popup is drawn either in the focused pane or in a Rex
-floating pane, never anything in between. Floats on the whole editor that
-you go into, such as pickers, and ones you can't go into, such as
-which-key and notifications, open in Rex floating panes, along with any
-floats attached to them. The completion menu, floats at the cursor or on a
-window, and statuslines are drawn inside the pane they belong to.
+floating pane. Floats on the whole editor that you go into, such as pickers,
+and ones you can't go into, such as which-key and notifications, open in Rex
+floating panes, along with any floats attached to them. The completion menu,
+floats at the cursor or on a window, and statuslines are drawn inside the pane
+they belong to.
 
 ![neorex demo](assets/demo.gif)
 
@@ -24,8 +24,9 @@ AI has been used heavily in building neorex due to limits on my available time. 
 
 - macOS or Linux
 - [Rex](https://www.superlogical.com/rex), with its setting to auto-balance
-  splits turned off. Otherwise Rex evens out every new split, so a sidebar
-  such as neo-tree opens at half the window instead of its own width.
+  splits turned off if you want layouts driven by Neovim. Otherwise Rex evens
+  out every new split, so a sidebar such as neo-tree opens at half the window
+  instead of its own width.
 - A recent Neovim. It's developed against 0.13-dev; older versions may show
   no statuslines.
 - Zig 0.17 to build from source
@@ -157,12 +158,13 @@ Plugins that set their own RGB colors keep them.
 
 ## Pickers in Rex's command palette
 
-neorex can ask questions in Rex's command palette instead of in Neovim:
+neorex can optionally use Rex's native pickers and inputs:
 `vim.ui.select` (LSP code actions and many plugins), `vim.ui.input` (LSP
-rename), pickers for buffers and files, and lists of your own. Each is
-something you choose: nothing moves to Rex until you turn it on or map it.
+rename), a set of pickers (files, grep, LSP, diagnostics and more), and lists
+of your own. Each can be enabled in your Neovim config and is not used by
+default.
 
-Rex only lets an action from its own config ask a question, so this needs one
+Rex only lets an action from its own config use its prompts, so this needs one
 line in Rex's config, `~/.config/rex/init.lua`:
 
 ```lua
@@ -185,8 +187,8 @@ starts, such as snacks.nvim's picker, which then asks when no Rex app can. A
 replacement made later, after startup, is left alone. To change the options
 while Neovim runs, call `neorex.configure({ ... })`.
 
-Map the pickers you want in Rex. They're named as snacks.nvim names its
-pickers, so moving a key over means changing `Snacks.picker.<name>` to
+Map the pickers you want in Rex. They use snacks.nvim's picker names, so
+moving a key over means changing `Snacks.picker.<name>` to
 `pick.<name>`:
 
 ```lua
@@ -242,10 +244,11 @@ loading neorex's actions, shows a message and asks nothing.
 ## Current limitations
 
 - The `<C-w>` resize, swap and move commands do nothing. Use Rex's own pane
-  controls instead.
+  controls instead. This is intentional for now: I recommend using Rex's window
+  management commands, which I find are just better than Neovim's.
 - Plugins that arrange windows (sidebars, layout managers) don't get the
-  placement they expect.
-- Only one tab page: Neovim tab pages aren't Rex tabs.
+  placement they expect: Rex decides where panes go (see above).
+- Only one tab page: Neovim tab pages aren't Rex tabs (for now...).
 - No external command line or messages: long messages still show
   "Press ENTER".
 - No global statusline: neorex sets `laststatus=3` to `2`, so each pane shows
