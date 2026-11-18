@@ -185,19 +185,49 @@ starts, such as snacks.nvim's picker, which then asks when no Rex app can. A
 replacement made later, after startup, is left alone. To change the options
 while Neovim runs, call `neorex.configure({ ... })`.
 
-Map the pickers you want in Rex:
+Map the pickers you want in Rex. They're named as snacks.nvim names its
+pickers, so moving a key over means changing `Snacks.picker.<name>` to
+`pick.<name>`:
 
 ```lua
 if vim.g.neorex then
-  vim.keymap.set("n", "<leader>fb", function() require("neorex.pick").buffers() end)
-  vim.keymap.set("n", "<leader>ff", function() require("neorex.pick").files() end)
+  local pick = require("neorex.pick")
+  vim.keymap.set("n", "<leader>ff", pick.files)
+  vim.keymap.set("n", "<leader>fb", pick.buffers)
+  vim.keymap.set("n", "<leader>sg", pick.grep)
+  vim.keymap.set("n", "grr", pick.lsp_references)
 end
 ```
 
-`files` lists git's files, or ripgrep's outside a repository;
-`files({ cmd = { "fd", "--type", "f", "--hidden" } })` lists with your own
-command. Rex shows at most 2,000 items: a longer list shows its first 2,000,
-and its title says so.
+| Picker | Lists | Choosing one |
+|---|---|---|
+| `files` | git's files, or ripgrep's outside a repository; `files({ cmd = { "fd", "--type", "f", "--hidden" } })` lists with your own command | opens it |
+| `git_files` | files git tracks | opens it |
+| `git_status` | changed and untracked files, with their status | opens it |
+| `recent` | `v:oldfiles` that still exist | opens it |
+| `buffers` | listed buffers | goes to it |
+| `grep` | asks what to search for, then lists the matches (ripgrep, else `git grep`) | goes to it |
+| `grep_word` | matches for the word under the cursor | goes to it |
+| `lines` | the buffer's lines | goes to it |
+| `lsp_definitions`, `lsp_declarations`, `lsp_type_definitions` | as `vim.lsp.buf`'s: a single result is gone to without asking | goes to it |
+| `lsp_references`, `lsp_implementations` | as `vim.lsp.buf`'s | goes to it |
+| `lsp_symbols` | the buffer's symbols | goes to it |
+| `lsp_workspace_symbols` | asks for a query, then lists matching symbols | goes to it |
+| `diagnostics`, `diagnostics_buffer` | every buffer's, or this buffer's, errors first | goes to it |
+| `qflist`, `loclist` | the quickfix or location list | goes to it |
+| `marks` | marks a-z, A-Z and 0-9 | goes to it |
+| `jumps` | the jumplist, most recent first | goes to it |
+| `registers` | registers that hold something | puts it after the cursor |
+| `command_history` | commands run before | runs it again |
+| `search_history` | searches made before | searches again |
+| `commands` | Ex commands | runs a user command that takes no arguments; starts typing any other |
+| `colorschemes` | installed colorschemes | applies it |
+
+Going to a location leaves a mark in the jumplist, and the LSP pickers put
+where you came from on the tag stack, so `CTRL-T` goes back. Grep asks for
+the whole query, then lists the matches: Rex's palette can't search as you
+type, or preview. Rex shows at most 2,000 items: a longer list shows its first
+2,000, and its title says so.
 
 For a list of your own, call `require("neorex.ui").select`. It takes
 `vim.ui.select`'s arguments, and `opts.rex` adds what only Rex shows:

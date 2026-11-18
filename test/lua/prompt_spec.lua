@@ -36,11 +36,14 @@ d=$(dirname "$0")
 n=$(( $(cat "$d/count" 2>/dev/null || echo 0) + 1 ))
 echo $n > "$d/count"
 echo "$*" >> "$d/argv"
-case "$*" in *client.action*) cat > "$d/stdin.$n" ; cp "$d/stdin.$n" "$d/stdin" ;; esac
 pick() { if [ -f "$d/$1.$n" ]; then cat "$d/$1.$n"; else cat "$d/$1" 2>/dev/null; fi; }
-pick reply
-pick stderr >&2
-code=$(pick code); exit ${code:-0}
+# read the whole answer before recording stdin: a test that sees stdin may
+# change the answer for the next call at once
+reply=$(pick reply); err=$(pick stderr); code=$(pick code)
+case "$*" in *client.action*) cat > "$d/stdin.$n" ; cp "$d/stdin.$n" "$d/stdin" ;; esac
+[ -n "$reply" ] && printf '%s\n' "$reply"
+[ -n "$err" ] && printf '%s\n' "$err" >&2
+exit ${code:-0}
 ]])
 f:close()
 vim.fn.setfperm(fake, 'rwxr-xr-x')
@@ -457,6 +460,343 @@ test('pick.files: a command that fails says so', function()
   eq("neorex: couldn't list files with false", notes[1].msg)
 end)
 
+test('parse_grep: rg --vimgrep and git grep --column lines', function()
+  local cases = {
+    { name = 'match', lines = { 'src/a.zig:12:5:  const x = 1;' },
+      want = { { filename = 'src/a.zig', lnum = 12, col = 5, text = '  const x = 1;' } } },
+    { name = 'colons in the text', lines = { 'a.lua:1:1:x = { a: 1 }' },
+      want = { { filename = 'a.lua', lnum = 1, col = 1, text = 'x = { a: 1 }' } } },
+    { name = 'empty text', lines = { 'a:3:1:' }, want = { { filename = 'a', lnum = 3, col = 1, text = '' } } },
+    { name = 'not a match', lines = { 'warning: something', '' }, want = {} },
+    { name = 'under cwd', lines = { 'a.zig:1:2:x' }, cwd = '/r',
+      want = { { filename = '/r/a.zig', lnum = 1, col = 2, text = 'x' } } },
+  }
+  for _, c in ipairs(cases) do
+    eq(c.want, pick.parse_grep(c.lines, c.cwd), c.name)
+  end
+end)
+
+test('grep_cmd: smart case for git grep', function()
+  if vim.fn.executable('rg') == 1 then
+    eq({ 'rg', '--vimgrep', '--smart-case', '--', 'Foo' }, pick.grep_cmd('Foo'))
+    return
+  end
+  eq({ 'git', 'grep', '-n', '--column', '-I', '-E', '--untracked', '-i', '-e', 'foo' }, pick.grep_cmd('foo'))
+  eq({ 'git', 'grep', '-n', '--column', '-I', '-E', '--untracked', '-e', 'Foo' }, pick.grep_cmd('Foo'))
+end)
+
+-- A file to grep and jump in.
+local grep_dir = dir .. '-grep'
+vim.fn.mkdir(grep_dir .. '/sub', 'p')
+do
+  local h = assert(io.open(grep_dir .. '/sub/b.txt', 'w'))
+  h:write('one\n  two needle\nthree\n')
+  h:close()
+end
+
+test('grep: asks in Rex, lists the matches, and goes to the chosen one', function()
+  reset()
+  write('reply.1', answer({ text = 'needle' }))
+  write('reply.2', answer({ ids = { '1' } }))
+  pick.grep({ cwd = grep_dir, cmd = function(q) return { 'printf', 'sub/b.txt:2:7:  two %s\\n', q } end })
+  wait(function() return vim.api.nvim_buf_get_name(0):find('b.txt', 1, true) end)
+  eq({ 2, 6 }, vim.api.nvim_win_get_cursor(0))
+  eq({ action = 'neorex_prompt', args = { version = prompt.version, kind = 'input', prompt = { title = 'Grep' } } },
+    vim.json.decode(read('stdin.1')))
+  eq({
+    title = 'Grep: needle',
+    items = { { id = '1', title = 'two needle', subtitle = vim.fn.fnamemodify(grep_dir .. '/sub/b.txt', ':~:.') .. ':2', icon = 'document' } },
+  }, sent().args.prompt)
+end)
+
+test('search: the default command finds matches in this repository', function()
+  rex_answers({ failed = 'cancelled' })
+  pick.search('neorex_prompt')
+  wait(function() return read('stdin') end)
+  local items = sent().args.prompt.items
+  assert(#items > 0, 'no matches')
+  for _, it in ipairs(items) do assert(it.subtitle:match(':%d+$'), it.subtitle) end
+end)
+
+test('search: no matches, and a failing command, say so', function()
+  rex_answers({ failed = 'cancelled' })
+  notes = {}
+  pick.search('x', { cmd = function() return { 'sh', '-c', 'exit 1' } end })
+  wait(function() return #notes > 0 end)
+  eq('neorex: no matches for x', notes[1].msg)
+  notes = {}
+  pick.search('x', { cmd = function() return { 'sh', '-c', 'echo bad regex >&2; exit 2' } end })
+  wait(function() return #notes > 0 end)
+  eq('neorex: sh failed: bad regex', notes[1].msg)
+  eq(0, calls(), 'Rex was never asked')
+end)
+
+-- vim.lsp.buf, answering with `items`
+local function stub_lsp(items)
+  local got = {}
+  for _, name in ipairs({ 'definition', 'declaration', 'type_definition', 'implementation', 'document_symbol' }) do
+    vim.lsp.buf[name] = function(opts) got[#got + 1] = name; opts.on_list({ title = name, items = items }) end
+  end
+  vim.lsp.buf.references = function(_, opts) got[#got + 1] = 'references'; opts.on_list({ title = 'r', items = items }) end
+  vim.lsp.buf.workspace_symbol = function(q, opts) got[#got + 1] = 'workspace_symbol ' .. q; opts.on_list({ title = 'w', items = items }) end
+  return got
+end
+
+local b_txt = grep_dir .. '/sub/b.txt'
+
+test('lsp: one definition is gone to without asking, with CTRL-T back', function()
+  vim.cmd.edit(vim.fn.fnameescape(b_txt))
+  vim.api.nvim_win_set_cursor(0, { 1, 0 })
+  rex_answers({ failed = 'cancelled' })
+  local got = stub_lsp({ { filename = b_txt, lnum = 3, col = 2, text = 'three' } })
+  pick.lsp_definitions()
+  eq({ 'definition' }, got)
+  eq({ 3, 1 }, vim.api.nvim_win_get_cursor(0))
+  eq(0, calls(), 'Rex was never asked')
+  vim.cmd('pop')
+  eq({ 1, 0 }, vim.api.nvim_win_get_cursor(0))
+end)
+
+test('lsp: references always ask, even for one', function()
+  vim.api.nvim_win_set_cursor(0, { 1, 0 })
+  rex_answers({ ids = { '1' } })
+  stub_lsp({ { filename = b_txt, lnum = 2, col = 3, text = '  two needle' } })
+  pick.lsp_references()
+  wait(function() return vim.api.nvim_win_get_cursor(0)[1] == 2 end)
+  eq('References', sent().args.prompt.title)
+end)
+
+test('lsp: symbols show their kind as detail, not in the title', function()
+  rex_answers({ ids = { '2' } })
+  stub_lsp({
+    { filename = b_txt, lnum = 1, col = 1, kind = 'Function', text = '[Function] one' },
+    { filename = b_txt, lnum = 3, col = 1, kind = 'Variable', text = '[Variable] three in M' },
+  })
+  pick.lsp_symbols()
+  wait(function() return vim.api.nvim_win_get_cursor(0)[1] == 3 end)
+  local items = sent().args.prompt.items
+  eq({ 'one', 'Function', 'code' }, { items[1].title, items[1].detail, items[1].icon })
+  eq({ 'three in M', 'Variable' }, { items[2].title, items[2].detail })
+end)
+
+test('lsp: workspace symbols asks for a query first', function()
+  reset()
+  write('reply.1', answer({ text = 'thr' }))
+  write('reply.2', answer({ ids = { '1' } }))
+  vim.api.nvim_win_set_cursor(0, { 1, 0 })
+  local got = stub_lsp({ { filename = b_txt, lnum = 3, col = 1, kind = 'Variable', text = '[Variable] three' } })
+  pick.lsp_workspace_symbols()
+  wait(function() return vim.api.nvim_win_get_cursor(0)[1] == 3 end)
+  eq({ 'workspace_symbol thr' }, got)
+  eq('Symbols: thr', sent().args.prompt.title)
+end)
+
+test('lsp: with no app to ask, vim.ui.select lists locations readably', function()
+  stub_vim_ui()
+  rex_answers({ failed = 'no_client' })
+  stub_lsp({ { filename = b_txt, lnum = 2, col = 3, text = '  two needle' }, { filename = b_txt, lnum = 3, col = 1, text = 'three' } })
+  pick.lsp_references()
+  wait(function() return before.select end)
+  local first = before.select[2].format_item(before.select[1][1])
+  assert(first:match('b%.txt:2: two needle$'), first)
+end)
+
+-- Opens picker `open` once to see its rows, then again answering with the
+-- first row `want` accepts. Returns that row and all the rows.
+local function choose_row(open, want)
+  rex_answers({ failed = 'cancelled' })
+  open()
+  wait(function() return read('stdin') end)
+  local rows = sent().args.prompt.items
+  for _, row in ipairs(rows) do
+    if want(row) then
+      rex_answers({ ids = { row.id } })
+      open()
+      return row, rows
+    end
+  end
+  error('no row matched in ' .. vim.inspect(rows), 2)
+end
+
+local function titled(t) return function(row) return row.title == t end end
+
+-- A buffer of its own holding `lines`.
+local function scratch(lines)
+  vim.cmd.enew()
+  vim.bo.buftype = 'nofile'
+  vim.bo.bufhidden = 'wipe'
+  vim.api.nvim_buf_set_lines(0, 0, -1, false, lines)
+  return vim.api.nvim_get_current_buf()
+end
+
+test('qflist and loclist: go to the chosen entry; empty says so', function()
+  vim.fn.setqflist({ { text = 'a line that is not a location' }, { filename = b_txt, lnum = 1, text = 'one' }, { filename = b_txt, lnum = 3, col = 2, text = 'three' } })
+  local _, qrows = choose_row(pick.qflist, titled('three'))
+  wait(function() return vim.api.nvim_win_get_cursor(0)[1] == 3 end)
+  eq('Quickfix', sent().args.prompt.title)
+  eq(2, #qrows, 'only valid entries')
+  vim.fn.setloclist(0, { { filename = b_txt, lnum = 2, text = 'two' } })
+  choose_row(pick.loclist, titled('two'))
+  wait(function() return vim.api.nvim_win_get_cursor(0)[1] == 2 end)
+  vim.fn.setqflist({})
+  reset()
+  notes = {}
+  pick.qflist()
+  eq('neorex: the quickfix list is empty', notes[1].msg)
+  eq(0, calls())
+end)
+
+test('diagnostics: errors first, severity as detail, first line of the message', function()
+  vim.cmd.edit(vim.fn.fnameescape(b_txt))
+  local ns = vim.api.nvim_create_namespace('neorex_test')
+  vim.diagnostic.set(ns, 0, {
+    { lnum = 2, col = 0, severity = vim.diagnostic.severity.ERROR, message = 'broken' },
+    { lnum = 0, col = 1, severity = vim.diagnostic.severity.WARN, message = 'careful\nmore' },
+  })
+  local _, rows = choose_row(pick.diagnostics, titled('broken'))
+  wait(function() return vim.api.nvim_win_get_cursor(0)[1] == 3 end)
+  eq({ { 'broken', 'error' }, { 'careful', 'warning' } }, vim.tbl_map(function(r) return { r.title, r.detail } end, rows))
+  choose_row(pick.diagnostics_buffer, titled('careful'))
+  wait(function() return vim.api.nvim_win_get_cursor(0)[1] == 1 end)
+  eq({ 1, 1 }, vim.api.nvim_win_get_cursor(0))
+  vim.diagnostic.reset(ns)
+end)
+
+test('git_files: lists what git tracks', function()
+  rex_answers({ failed = 'cancelled' })
+  pick.git_files()
+  wait(function() return read('stdin') end)
+  assert(#sent().args.prompt.items > 10)
+  assert(read('argv') == nil or not read('argv'):find('ls%-files'), 'git ran, not rex')
+end)
+
+test('recent: v:oldfiles that exist, without repeats or the current file', function()
+  assert(io.open(grep_dir .. '/sub/current.txt', 'w')):close()
+  vim.cmd.edit(vim.fn.fnameescape(grep_dir .. '/sub/current.txt'))
+  vim.v.oldfiles = { b_txt, dir .. '/gone.txt', vim.api.nvim_buf_get_name(0), b_txt }
+  local _, rows = choose_row(pick.recent, titled('b.txt'))
+  wait(function() return vim.api.nvim_buf_get_name(0) == b_txt end)
+  eq(1, #rows)
+end)
+
+test('lines: the buffer\'s lines that aren\'t blank, with their number', function()
+  scratch({ 'alpha', '', '   beta' })
+  local _, rows = choose_row(pick.lines, titled('beta'))
+  wait(function() return vim.api.nvim_win_get_cursor(0)[1] == 3 end)
+  eq({ 3, 3 }, vim.api.nvim_win_get_cursor(0))
+  eq({ { 'alpha', '1' }, { 'beta', '3' } }, vim.tbl_map(function(r) return { r.title, r.detail } end, rows))
+end)
+
+test('marks: the mark as detail and its line as title', function()
+  vim.cmd.edit(vim.fn.fnameescape(b_txt))
+  vim.api.nvim_buf_set_mark(0, 'q', 3, 0, {})
+  vim.api.nvim_win_set_cursor(0, { 1, 0 })
+  local row = choose_row(pick.marks, function(r) return r.detail == 'q' end)
+  wait(function() return vim.api.nvim_win_get_cursor(0)[1] == 3 end)
+  eq('three', row.title)
+end)
+
+test('jumps: most recent first', function()
+  vim.cmd.edit(vim.fn.fnameescape(b_txt))
+  vim.cmd('clearjumps')
+  vim.api.nvim_win_set_cursor(0, { 1, 0 })
+  vim.cmd('normal! G')
+  vim.cmd('normal! gg')
+  local _, rows = choose_row(pick.jumps, titled('three'))
+  wait(function() return vim.api.nvim_win_get_cursor(0)[1] == 3 end)
+  eq({ 'three', 'one' }, vim.tbl_map(function(r) return r.title end, rows))
+end)
+
+test('registers: one line each, and choosing puts it', function()
+  scratch({ 'ab' })
+  vim.api.nvim_win_set_cursor(0, { 1, 0 })
+  vim.fn.setreg('k', 'X')
+  vim.fn.setreg('j', 'two\nlines')
+  local _, rows = choose_row(pick.registers, function(r) return r.detail == '"k' end)
+  wait(function() return vim.api.nvim_get_current_line() == 'aXb' end)
+  local j
+  for _, r in ipairs(rows) do if r.detail == '"j' then j = r end end
+  eq('two ↵ lines', j.title)
+end)
+
+test('command_history: runs the chosen command again', function()
+  vim.fn.histadd('cmd', 'let g:neorex_ran = 1')
+  local row = choose_row(pick.command_history, titled(':let g:neorex_ran = 1'))
+  wait(function() return vim.g.neorex_ran == 1 end)
+  eq('1', row.id, 'most recent first')
+end)
+
+test('a chosen action that fails shows its error', function()
+  vim.fn.histadd('cmd', 'NoSuchCommand')
+  notes = {}
+  choose_row(pick.command_history, titled(':NoSuchCommand'))
+  wait(function() return #notes > 0 end)
+  eq({ { msg = 'neorex: E492: Not an editor command: NoSuchCommand', level = vim.log.levels.ERROR } }, notes)
+end)
+
+test('search_history: searches for the chosen pattern', function()
+  vim.cmd.edit(vim.fn.fnameescape(b_txt))
+  vim.api.nvim_win_set_cursor(0, { 1, 0 })
+  vim.fn.histadd('search', 'thr')
+  choose_row(pick.search_history, titled('/thr'))
+  wait(function() return vim.api.nvim_win_get_cursor(0)[1] == 3 end)
+  eq('thr', vim.fn.getreg('/'))
+end)
+
+test('colorschemes: marks the current one, and applies the chosen one', function()
+  vim.cmd.colorscheme('default')
+  local _, rows = choose_row(pick.colorschemes, titled('blue'))
+  wait(function() return vim.g.colors_name == 'blue' end)
+  for _, r in ipairs(rows) do
+    eq(r.title == 'default' and 'current' or nil, r.detail, r.title)
+  end
+  vim.cmd.colorscheme('default')
+end)
+
+test('commands: runs one without arguments, starts typing one with', function()
+  vim.api.nvim_create_user_command('NeorexTestRun', function() vim.g.neorex_run = 1 end, { desc = 'Run the test' })
+  vim.api.nvim_create_user_command('NeorexTestArgs', function() end, { nargs = 1 })
+  local row = choose_row(pick.commands, titled(':NeorexTestRun'))
+  wait(function() return vim.g.neorex_run == 1 end)
+  eq('Run the test', row.subtitle)
+  local fed
+  local feed = pick.feed
+  pick.feed = function(keys) fed = keys end
+  choose_row(pick.commands, titled(':NeorexTestArgs'))
+  wait(function() return fed end)
+  pick.feed = feed
+  eq(':NeorexTestArgs ', fed)
+end)
+
+test('parse_git_status: status, path, and renames', function()
+  eq({
+    { path = '/r/a.zig', status = 'M' },
+    { path = '/r/new file.txt', status = '??' },
+    { path = '/r/src/new.zig', status = 'R' },
+    { path = '/r/b.zig', status = 'MM' },
+  }, pick.parse_git_status(' M a.zig\0?? new file.txt\0R  src/new.zig\0old.zig\0MM b.zig\0', '/r'))
+  eq({}, pick.parse_git_status('', '/r'))
+end)
+
+test('git_status: lists changed files from the repository\'s root, and opens one', function()
+  local repo = dir .. '-repo'
+  vim.fn.mkdir(repo .. '/sub', 'p')
+  vim.system({ 'git', 'init', '-q', repo }):wait()
+  assert(io.open(repo .. '/sub/c.txt', 'w')):close()
+  local cwd = vim.fn.getcwd()
+  vim.fn.chdir(repo .. '/sub')
+  local ok, row = pcall(function()
+    local r = choose_row(pick.git_status, titled('c.txt'))
+    wait(function() return vim.fs.basename(vim.api.nvim_buf_get_name(0)) == 'c.txt' end)
+    return r
+  end)
+  vim.fn.chdir(cwd)
+  assert(ok, row)
+  eq('??', row.detail)
+  vim.cmd('silent! %bwipeout!')
+  vim.fn.delete(repo, 'rf')
+end)
+
 test('install: copies rex/neorex.lua once, and reloads Rex\'s config', function()
   prompt.state_path = dir .. '/state/neorex/rex.lua'
   reset()
@@ -523,6 +863,7 @@ test('rex/neorex.lua and prompt.lua agree on the version', function()
   eq(prompt.version, tonumber(src:match('local version = (%d+)')))
 end)
 
-vim.fn.delete(dir, 'rf')
+vim.fn.delete(dir, "rf")
+vim.fn.delete(grep_dir, "rf")
 io.stdout:write(failures == 0 and 'all passed\n' or (failures .. ' failed\n'))
 os.exit(failures == 0 and 0 or 1)
