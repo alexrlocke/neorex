@@ -42,6 +42,7 @@ pub fn build(b: *std.Build) void {
         "runtime/lua/neorex/prompt.lua",
         "runtime/lua/neorex/ui.lua",
         "runtime/lua/neorex/pick.lua",
+        "runtime/lua/neorex/health.lua",
         "runtime/rex/neorex.lua",
         "test/lua/prompt_spec.lua",
     }) |lua| run_tests.addFileInput(b.path(lua));

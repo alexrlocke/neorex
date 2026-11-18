@@ -15,9 +15,11 @@ local version = 1
 rex.action {
   name = 'neorex_prompt',
   title = 'neorex: prompt',
-  -- args: { version, kind = 'input' | 'pick', prompt = rex.ui's table }
+  -- args: { version, kind = 'input' | 'pick', prompt = rex.ui's table },
+  -- or { probe = true } to learn this file's version without asking
   run = function(_, args)
     args = args or {}
+    if args.probe then return { version = version } end
     if args.version ~= version then return { failed = 'outdated' } end
     -- no pcall: prompts fail inside one. A prompt Rex refuses raises an
     -- error, which neorex takes as a reason to fall back.

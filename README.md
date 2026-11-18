@@ -159,8 +159,8 @@ Plugins that set their own RGB colors keep them.
 
 neorex can ask questions in Rex's command palette instead of in Neovim:
 `vim.ui.select` (LSP code actions and many plugins), `vim.ui.input` (LSP
-rename), and pickers for buffers and files. When Rex can't ask, for
-example when no Rex app is open, Neovim asks as usual.
+rename), pickers for buffers and files, and lists of your own. Each is
+something you choose: nothing moves to Rex until you turn it on or map it.
 
 Rex only lets an action from its own config ask a question, so this needs one
 line in Rex's config, `~/.config/rex/init.lua`:
@@ -170,21 +170,22 @@ pcall(dofile, os.getenv("HOME") .. "/.local/state/neorex/rex.lua")
 ```
 
 neorex writes that file each time it starts and has Rex reload it when it
-changes, so it always matches the neorex you run.
+changes, so it always matches the neorex you run. `:checkhealth neorex` says
+whether Rex loads it and whether an app is connected to show prompts.
 
-The `vim.ui` replacements are off until you turn them on:
+The `vim.ui` replacements are off until you turn them on. Outside neorex this
+does nothing, so it needs no `if`:
 
 ```lua
-vim.g.neorex_config = {
-  ui = { select = "rex", input = "rex" },
-}
+vim.g.neorex_config = { ui = { select = "rex", input = "rex" } }
 ```
 
-To change them while Neovim runs, call `neorex.configure({ ... })`. A plugin that replaces
-`vim.ui.select` after neorex does (dressing.nvim, snacks.nvim,
-telescope-ui-select) wins; turn its replacement off to use Rex's.
+This takes precedence over plugins that replace `vim.ui.select` as Neovim
+starts, such as snacks.nvim's picker, which then asks when no Rex app can. A
+replacement made later, after startup, is left alone. To change the options
+while Neovim runs, call `neorex.configure({ ... })`.
 
-The pickers need no setting. Map them like any other:
+Map the pickers you want in Rex:
 
 ```lua
 if vim.g.neorex then
@@ -193,8 +194,20 @@ if vim.g.neorex then
 end
 ```
 
-`files` lists git's files, or ripgrep's outside a repository. Rex shows at
-most 2,000 items: a longer list shows its first 2,000.
+`files` lists git's files, or ripgrep's outside a repository;
+`files({ cmd = { "fd", "--type", "f", "--hidden" } })` lists with your own
+command. Rex shows at most 2,000 items: a longer list shows its first 2,000,
+and its title says so.
+
+For a list of your own, call `require("neorex.ui").select`. It takes
+`vim.ui.select`'s arguments, and `opts.rex` adds what only Rex shows:
+`title`, `subtitle` and `detail` (functions of an item), `icon`, `placeholder`,
+`multiple` (choose several: the callback gets a list) and `allow_other`
+(answer with typed text).
+
+If no connected Rex app can show a prompt, Neovim asks instead. Anything else
+that stops Rex asking, such as Rex already asking something or its config not
+loading neorex's actions, shows a message and asks nothing.
 
 ## Current limitations
 

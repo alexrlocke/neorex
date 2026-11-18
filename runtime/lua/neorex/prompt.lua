@@ -7,14 +7,22 @@ local M = {}
 -- Matches `version` in rex/neorex.lua.
 M.version = 1
 
--- The `rex` to run. Tests point it at a fake.
-M.rex = 'rex'
+-- The `rex` to run: the one neorex's terminal came from, as the daemon finds
+-- it (src/rex/server.zig), else the one on PATH. Tests point it at a fake.
+M.rex = vim.env.REX_BIN_DIR and (vim.env.REX_BIN_DIR .. '/rex') or 'rex'
 
 -- Where Rex's init.lua loads neorex's actions from.
 M.state_path = (vim.env.HOME or '') .. '/.local/state/neorex/rex.lua'
 
+-- The line that loads them, for Rex's init.lua.
+M.setup_line = 'pcall(dofile, os.getenv("HOME") .. "/.local/state/neorex/rex.lua")'
+
 -- Rex lists at most this many items.
 M.max_items = 2000
+
+local function notify(msg, level)
+  vim.notify('neorex: ' .. msg, level or vim.log.levels.WARN)
+end
 
 local function read(path)
   local f = io.open(path, 'rb')
@@ -22,6 +30,14 @@ local function read(path)
   local s = f:read('*a')
   f:close()
   return s
+end
+
+-- Asks Rex to read its configuration again, then calls `on_done(ok)`.
+local function reload(on_done)
+  local ok = pcall(vim.system, { M.rex, 'config', 'reload' }, { text = true }, function(out)
+    vim.schedule(function() on_done(out.code == 0) end)
+  end)
+  if not ok then vim.schedule(function() on_done(false) end) end
 end
 
 -- Copies rex/neorex.lua to `state_path` when it differs, then asks Rex to
@@ -37,46 +53,112 @@ function M.install()
   if not f then return false end
   f:write(want)
   f:close()
-  -- harmless when Rex's init.lua doesn't load it, or Rex isn't running
-  pcall(vim.system, { M.rex, 'config', 'reload' }, { text = true })
+  -- harmless when Rex's init.lua doesn't load it
+  reload(function() end)
   return true
 end
 
--- What a `client.action` answer means for the question:
---   { ids = {...} } or { text = '...' }  answered
---   { cancelled = true }                  the person closed it, or it timed out
---   nil                                   Rex couldn't ask: show Neovim's own
-function M.outcome(code, stdout)
-  if code ~= 0 then return nil end
+-- What `rex api call client.action` answered, from its exit code and output:
+--   { ids = {...} } / { text = '...' }  answered
+--   { cancelled = true }  the person closed it, or it timed out
+--   { fallback = true }   no connected app can show a prompt
+--   { busy = true }       every app is showing a question already
+--   { outdated = true }   Rex runs an older rex/neorex.lua
+--   { not_set_up = true } Rex's init.lua doesn't load rex/neorex.lua
+--   { error = '...' }     anything else, such as a prompt Rex refused
+function M.classify(code, stdout, stderr)
+  if code ~= 0 then
+    stderr = vim.trim(stderr or '')
+    if stderr:find('code=not_found', 1, true) and stderr:find('neorex_prompt', 1, true) then
+      return { not_set_up = true }
+    end
+    return { error = stderr ~= '' and stderr or ('rex exited with ' .. code) }
+  end
   local ok, res = pcall(vim.json.decode, stdout or '')
-  if not ok or type(res) ~= 'table' then return nil end
-  local r = res.result
-  if type(r) ~= 'table' then return nil end
-  if r.failed == 'cancelled' or r.failed == 'timeout' then return { cancelled = true } end
-  if r.failed ~= nil then return nil end
-  if type(r.ids) == 'table' then return { ids = r.ids } end
-  if type(r.text) == 'string' then return { text = r.text } end
-  return nil
+  local r = ok and type(res) == 'table' and res.result or nil
+  if type(r) ~= 'table' then return { error = 'Rex answered without a result: ' .. vim.trim(stdout or '') } end
+  local why = r.failed
+  if why == nil then
+    if type(r.ids) == 'table' then return { ids = r.ids } end
+    if type(r.text) == 'string' then return { text = r.text } end
+    return { error = 'Rex answered without ids or text' }
+  end
+  if why == 'cancelled' or why == 'timeout' then return { cancelled = true } end
+  if why == 'no_client' or why == 'unsupported' then return { fallback = true } end
+  if why == 'busy' then return { busy = true } end
+  if why == 'outdated' then return { outdated = true } end
+  return { error = 'Rex couldn\'t ask: ' .. tostring(why) .. (r.detail and (' (' .. r.detail .. ')') or '') }
 end
 
--- Asks `prompt` (rex.ui.input's or rex.ui.pick's table) and calls
--- `on_done(outcome)` on the main loop, as `outcome` describes.
-function M.run(kind, prompt, on_done)
-  if kind == 'pick' and #(prompt.items or {}) > M.max_items then
-    return vim.schedule(function() on_done(nil) end)
-  end
-  local payload = vim.json.encode({
-    action = 'neorex_prompt',
-    args = { version = M.version, kind = kind, prompt = prompt },
-  })
-  local ok = pcall(vim.system, { M.rex, 'api', 'call', '--timeout', '1h', 'client.action', '-' }, {
+-- Runs one `client.action` and calls `on_class(classify's table)`.
+local function call(args, on_class)
+  local payload = vim.json.encode({ action = 'neorex_prompt', args = args })
+  local ok, err = pcall(vim.system, { M.rex, 'api', 'call', '--timeout', '1h', 'client.action', '-' }, {
     stdin = payload,
     text = true,
   }, function(out)
-    vim.schedule(function() on_done(M.outcome(out.code, out.stdout)) end)
+    vim.schedule(function() on_class(M.classify(out.code, out.stdout, out.stderr)) end)
   end)
-  -- no `rex` to run
-  if not ok then vim.schedule(function() on_done(nil) end) end
+  if not ok then
+    vim.schedule(function() on_class({ error = 'couldn\'t run ' .. M.rex .. ': ' .. tostring(err) }) end)
+  end
+end
+
+-- Asks `prompt` (rex.ui.input's or rex.ui.pick's table) and calls
+-- `on_done(outcome)` on the main loop:
+--   { ids = {...} } or { text = '...' }  answered
+--   { cancelled = true }  closed, timed out, or Rex couldn't ask for a reason
+--                         neorex has already shown
+--   nil                   no connected app can show a prompt: ask in Neovim
+-- A pick with more items than Rex lists keeps the first `max_items`, and its
+-- title says so.
+function M.run(kind, prompt, on_done)
+  if kind == 'pick' and #(prompt.items or {}) > M.max_items then
+    local all = #prompt.items
+    prompt = vim.deepcopy(prompt)
+    for i = all, M.max_items + 1, -1 do prompt.items[i] = nil end
+    prompt.title = ('%s (first %d of %d)'):format(prompt.title, M.max_items, all)
+  end
+  local args = { version = M.version, kind = kind, prompt = prompt }
+  local retried = false
+  local function handle(c)
+    if c.ids or c.text then return on_done({ ids = c.ids, text = c.text }) end
+    if c.cancelled then return on_done({ cancelled = true }) end
+    if c.fallback then return on_done(nil) end
+    if c.outdated and not retried then
+      -- neorex was upgraded and Rex hasn't read the new file yet
+      retried = true
+      return reload(function() call(args, handle) end)
+    end
+    if c.outdated then
+      notify('Rex runs an older ' .. M.state_path .. '. Run `rex config reload`.', vim.log.levels.ERROR)
+    elseif c.busy then
+      notify('Rex is already asking something.', vim.log.levels.INFO)
+    elseif c.not_set_up then
+      notify('Rex isn\'t set up to ask for neorex. Add this line to ~/.config/rex/init.lua, then run `rex config reload`:\n  ' .. M.setup_line)
+    else
+      notify(c.error, vim.log.levels.ERROR)
+    end
+    on_done({ cancelled = true })
+  end
+  call(args, handle)
+end
+
+-- The version of rex/neorex.lua that Rex runs, without asking anything:
+-- calls `on_done(version)`, or `on_done(nil, classify's table)`.
+function M.probe(on_done)
+  local ok = pcall(vim.system, { M.rex, 'api', 'call', 'client.action', '-' }, {
+    stdin = vim.json.encode({ action = 'neorex_prompt', args = { probe = true } }),
+    text = true,
+  }, function(out)
+    vim.schedule(function()
+      local okj, res = pcall(vim.json.decode, out.stdout or '')
+      local v = out.code == 0 and okj and type(res) == 'table' and type(res.result) == 'table' and res.result.version
+      if v then return on_done(v) end
+      on_done(nil, M.classify(out.code, out.stdout, out.stderr))
+    end)
+  end)
+  if not ok then vim.schedule(function() on_done(nil, { error = 'couldn\'t run ' .. M.rex }) end) end
 end
 
 -- A title for Rex from a Neovim prompt such as 'Rename to: '.
