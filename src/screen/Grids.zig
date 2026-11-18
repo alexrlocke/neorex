@@ -605,6 +605,44 @@ test "hl_attr_define keeps palette indices only without RGB colors" {
     try testing.expectEqual(@as(?u24, 0x112233), mixed.bg);
 }
 
+test "hl_attr_define keeps a palette background under an RGB text color" {
+    var gs: Grids = .{};
+    defer gs.deinit(testing.allocator);
+    _ = try applyTest(&gs, struct {
+        fn define(w: *Writer, id: i64, cterm_fg: bool) !void {
+            // ["hl_attr_define", [id, {foreground}, {foreground?, background: 9}, []]]
+            try msgpack.writeArrayHeader(w, 2);
+            try msgpack.writeStr(w, "hl_attr_define");
+            try msgpack.writeArrayHeader(w, 4);
+            try msgpack.writeInt(w, id);
+            try msgpack.writeMapHeader(w, 1);
+            try msgpack.writeStr(w, "foreground");
+            try msgpack.writeInt(w, 0x112233);
+            try msgpack.writeMapHeader(w, if (cterm_fg) 2 else 1);
+            if (cterm_fg) {
+                try msgpack.writeStr(w, "foreground");
+                try msgpack.writeInt(w, 4);
+            }
+            try msgpack.writeStr(w, "background");
+            try msgpack.writeInt(w, 9);
+            try msgpack.writeArrayHeader(w, 0);
+        }
+        fn f(w: *Writer) !void {
+            try msgpack.writeArrayHeader(w, 2);
+            try define(w, 1, false);
+            try define(w, 2, true);
+        }
+    }.f);
+    const on_palette = gs.style.attrs.items[1];
+    try testing.expectEqual(@as(?u24, 0x112233), on_palette.fg);
+    try testing.expectEqual(@as(?u8, null), on_palette.fg_idx);
+    try testing.expectEqual(@as(?u8, 9), on_palette.bg_idx);
+    // with a palette text color too, the indices are a 256-color fallback
+    const fallback = gs.style.attrs.items[2];
+    try testing.expectEqual(@as(?u8, null), fallback.fg_idx);
+    try testing.expectEqual(@as(?u8, null), fallback.bg_idx);
+}
+
 test "cursor modes and busy" {
     var gs: Grids = .{};
     defer gs.deinit(testing.allocator);
