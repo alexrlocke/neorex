@@ -20,6 +20,17 @@ M.setup_line = 'pcall(dofile, os.getenv("HOME") .. "/.local/state/neorex/rex.lua
 -- Rex lists at most this many items.
 M.max_items = 2000
 
+-- Rex refuses a request bigger than 64 KiB, measured as its CLI encodes it:
+-- the question plus the request around it. Questions stay under this.
+M.max_bytes = 60 * 1024
+
+-- `s`'s size once encoded as Rex's CLI does, which writes <, > and & as
+-- < and so on.
+local function encoded_size(s)
+  local _, n = s:gsub('[<>&]', '')
+  return #s + 5 * n
+end
+
 local function notify(msg, level)
   vim.notify('neorex: ' .. msg, level or vim.log.levels.WARN)
 end
@@ -110,15 +121,36 @@ end
 --   { cancelled = true }  closed, timed out, or Rex couldn't ask for a reason
 --                         neorex has already shown
 --   nil                   no connected app can show a prompt: ask in Neovim
--- A pick with more items than Rex lists keeps the first `max_items`, and its
--- title says so.
-function M.run(kind, prompt, on_done)
-  if kind == 'pick' and #(prompt.items or {}) > M.max_items then
-    local all = #prompt.items
-    prompt = vim.deepcopy(prompt)
-    for i = all, M.max_items + 1, -1 do prompt.items[i] = nil end
-    prompt.title = ('%s (first %d of %d)'):format(prompt.title, M.max_items, all)
+-- `prompt` cut to what Rex takes: a pick keeps its first `max_items` items,
+-- and only as many of those as fit in `max_bytes`, and then its title says
+-- how many it shows. The caller's table is left alone. Also returns whether
+-- it cut the list.
+function M.fit(kind, prompt)
+  local items = prompt.items or {}
+  if kind ~= 'pick' or #items == 0 then return prompt, false end
+  local all = #items
+  local title = ('%s (first %d of %d)'):format(prompt.title, all, all)
+  local rest = vim.tbl_extend('force', {}, prompt)
+  rest.items, rest.title = nil, title
+  local size = encoded_size(vim.json.encode({ action = 'neorex_prompt', args = { version = M.version, kind = kind, prompt = rest } }))
+    + #',"items":[]'
+  local keep = 0
+  for i = 1, math.min(all, M.max_items) do
+    -- each item and the comma before it
+    size = size + encoded_size(vim.json.encode(items[i])) + 1
+    if size > M.max_bytes then break end
+    keep = i
   end
+  if keep == all then return prompt, false end
+  local cut = vim.tbl_extend('force', {}, prompt)
+  cut.items = { unpack(items, 1, keep) }
+  cut.title = ('%s (first %d of %d)'):format(prompt.title, keep, all)
+  return cut, true
+end
+
+-- Lists cut by `fit` say so in their title.
+function M.run(kind, prompt, on_done)
+  prompt = M.fit(kind, prompt)
   local args = { version = M.version, kind = kind, prompt = prompt }
   local retried = false
   local function handle(c)

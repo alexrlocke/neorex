@@ -226,6 +226,33 @@ test('run: no rex to run is an error', function()
   assert(notes[1] and notes[1].msg:find("couldn't run", 1, true), vim.inspect(notes))
 end)
 
+test('run: a list bigger than Rex takes sends the first items that fit, and says so', function()
+  rex_answers({ ids = { '1' } })
+  -- 2,000 items of about 90 bytes is about 180 KB: well over Rex's 64 KiB
+  local items = {}
+  for i = 1, 2000 do
+    items[i] = { id = tostring(i), title = ('file_%04d.rb'):format(i), subtitle = 'app/models/concerns/some/deep/<path>', icon = 'document' }
+  end
+  eq({ ids = { '1' } }, run('pick', { title = 'Files', items = items }))
+  local stdin = read('stdin')
+  -- as Rex's CLI encodes it: <, > and & as < and so on
+  local _, specials = stdin:gsub('[<>&]', '')
+  local size = #stdin + 5 * specials
+  assert(size <= prompt.max_bytes, ('sent %d bytes'):format(size))
+  assert(size > prompt.max_bytes - 200, ('sent only %d bytes'):format(size))
+  local p = sent().args.prompt
+  assert(#p.items > 100 and #p.items < 2000, #p.items)
+  eq(('Files (first %d of 2000)'):format(#p.items), p.title)
+  eq(tostring(#p.items), p.items[#p.items].id, 'the first items, in order')
+  eq(2000, #items, "the caller's list is left alone")
+end)
+
+test('fit: a list that fits is sent as it is', function()
+  local spec = { title = 'T', items = { { id = '1', title = 'a' } } }
+  eq(spec, prompt.fit('pick', spec))
+  eq({ title = 'T', value = string.rep('x', 100000) }, prompt.fit('input', { title = 'T', value = string.rep('x', 100000) }))
+end)
+
 test('run: more items than Rex lists sends the first max_items, and says so', function()
   rex_answers({ ids = { '1' } })
   local items = {}
@@ -334,6 +361,77 @@ test('ui.select: busy chooses nothing, and doesn\'t fall back', function()
   eq(nil, before.select)
 end)
 
+test('filter: every word, in title, subtitle or detail, ignoring case unless capitalized', function()
+  local rows = {
+    { id = '1', title = 'user.rb', subtitle = 'packs/billing/app/models' },
+    { id = '2', title = 'User.rb', subtitle = 'app/models' },
+    { id = '3', title = 'invoice.rb', subtitle = 'packs/billing/app/models', detail = 'M' },
+  }
+  local ids = function(q) return vim.tbl_map(function(r) return r.id end, ui.filter(rows, q)) end
+  eq({ '1', '2' }, ids('user'))
+  eq({ '2' }, ids('User'))
+  eq({ '1' }, ids('billing user'))
+  eq({ '1', '3' }, ids('  billing  '))
+  eq({ '3' }, ids('m invoice'))
+  eq({}, ids('nothing'))
+  eq({ '1', '2', '3' }, ids(''))
+end)
+
+-- 2,000 paths, too many for Rex's 64 KiB, and the opts files use.
+local function many()
+  local paths = {}
+  for i = 1, 2000 do
+    paths[i] = ('packs/pack_%04d/app/models/%s.rb'):format(i, i == 1500 and 'needle_model' or 'model')
+  end
+  return paths, {
+    prompt = 'Files',
+    rex = {
+      title = function(p) return vim.fs.basename(p) end,
+      subtitle = function(p) return vim.fs.dirname(p) end,
+    },
+  }
+end
+
+test('ui.select: a list too big for Rex asks for a search term, then lists the matches', function()
+  reset()
+  write('reply.1', answer({ text = 'needle' }))
+  write('reply.2', answer({ ids = { '1500' } }))
+  local paths, opts = many()
+  eq({ paths[1500], 1500 }, choose(paths, opts, ui.select))
+  local ask = vim.json.decode(read('stdin.1')).args
+  eq('input', ask.kind)
+  eq({ title = 'Files', placeholder = 'Too many to list (2000): type part of one' }, ask.prompt)
+  local p = vim.json.decode(read('stdin.2')).args.prompt
+  eq('Files: needle', p.title)
+  eq({ { id = '1500', title = 'needle_model.rb', subtitle = 'packs/pack_1500/app/models' } }, p.items)
+end)
+
+test('ui.select: a search term that still matches too many lists the first that fit', function()
+  reset()
+  write('reply.1', answer({ text = 'model' }))
+  write('reply.2', answer({ failed = 'cancelled' }))
+  local paths, opts = many()
+  eq({ 'nil', 'nil' }, choose(paths, opts, ui.select))
+  local p = vim.json.decode(read('stdin.2')).args.prompt
+  assert(p.title:match('^Files: model %(first %d+ of 2000%)$'), p.title)
+end)
+
+test('ui.select: a list too big for Rex: closing, no match, and no app', function()
+  stub_vim_ui()
+  local paths, opts = many()
+  rex_answers({ failed = 'cancelled' })
+  eq({ 'nil', 'nil' }, choose(paths, opts, ui.select), 'closed')
+  eq(1, calls(), 'no list after closing')
+  rex_answers({ text = 'nothing like this' })
+  notes = {}
+  eq({ 'nil', 'nil' }, choose(paths, opts, ui.select), 'no match')
+  eq(1, calls(), 'no list without matches')
+  eq('neorex: nothing matches nothing like this', notes[1].msg)
+  rex_answers({ failed = 'no_client' })
+  eq({ paths[1], 1 }, choose(paths, opts, ui.select), 'no app')
+  eq(2000, #before.select[1], 'Neovim lists them all')
+end)
+
 test('ui.input: Rex answers, closes, or has no app to ask', function()
   stub_vim_ui()
   ui.set('input', true)
@@ -440,8 +538,8 @@ test('pick.files: opens the chosen file', function()
     title = 'Files',
     placeholder = 'File',
     items = {
-      { id = '1', title = 'build.zig', icon = 'document' },
-      { id = '2', title = 'main.zig', subtitle = 'src', icon = 'document' },
+      { id = '1', title = 'build.zig' },
+      { id = '2', title = 'main.zig', subtitle = 'src' },
     },
   }, sent().args.prompt)
 end)
