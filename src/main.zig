@@ -40,6 +40,7 @@ pub fn main(init: std.process.Init) !void {
     if (eql(cmd, "debug-tui")) return debug_tui.run(gpa, io, rest);
     if (eql(cmd, "debug-panes") and rest.len == 1) return debug_panes.run(io, rest[0]);
     if (eql(cmd, "debug-rex") and rest.len == 1) return debug_rex.run(gpa, io, rest[0]);
+    if (eql(cmd, "pane")) nameAfterNeovim(args[0]);
     if (eql(cmd, "pane") and rest.len == 1) return pane.run(io, rest[0], null);
     if (eql(cmd, "pane") and rest.len == 2) return pane.run(io, rest[0], std.fmt.parseInt(u32, rest[1], 10) catch {
         std.debug.print("{s}", .{usage});
@@ -53,7 +54,19 @@ pub fn main(init: std.process.Init) !void {
             std.process.exit(2);
         }
     }
+    nameAfterNeovim(args[0]);
     return launch.run(gpa, io, args[1..]);
+}
+
+/// Rex picks a pane's icon from its program's argv[0], so the launcher and
+/// the pane helpers overwrite theirs with `nvim`. An argv[0] too short to
+/// hold it is left alone.
+fn nameAfterNeovim(argv0: [:0]const u8) void {
+    const name = "nvim";
+    if (argv0.len < name.len) return;
+    const buf: []u8 = @constCast(argv0);
+    @memcpy(buf[0..name.len], name);
+    @memset(buf[name.len..], 0);
 }
 
 fn eql(a: []const u8, b: []const u8) bool {
