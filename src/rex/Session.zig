@@ -186,6 +186,37 @@ pub fn setWindowLabel(self: *Session, label: []const u8) !void {
     self.window_label.in_flight += 1;
 }
 
+/// Before we hang up: waits up to `timeout_ms` for Rex to answer our label
+/// changes, as Rex can drop a request whose connection closes first, which
+/// would leave our labels behind. Updates read meanwhile are dropped.
+pub fn awaitLabels(self: *Session, timeout_ms: u32) void {
+    const deadline = nowMs() + timeout_ms;
+    while (self.conn != .closed and self.labelsInFlight()) {
+        const left = deadline -| nowMs();
+        if (left == 0) return;
+        var fds = [_]std.c.pollfd{.{ .fd = self.client.fd(), .events = std.c.POLL.IN, .revents = 0 }};
+        if ((std.posix.poll(&fds, @intCast(left)) catch 0) == 0) return;
+        if (!(self.read() catch return)) return;
+        while (self.next() catch return) |_| {}
+    }
+}
+
+/// A label change of ours that Rex hasn't answered.
+fn labelsInFlight(self: *const Session) bool {
+    for (self.pending_requests.items) |p| switch (p.req) {
+        .set_block_label, .set_window_label => return true,
+        else => {},
+    };
+    return false;
+}
+
+/// Milliseconds on the monotonic clock.
+fn nowMs() u64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    return @as(u64, @intCast(ts.sec)) * std.time.ms_per_s + @as(u64, @intCast(ts.nsec)) / std.time.ns_per_ms;
+}
+
 /// A view may still show the window's label from before our last change.
 pub fn windowLabelLanding(self: *const Session) bool {
     return self.window_label.in_flight > 0 or self.view.rev < self.window_label.applied_rev;

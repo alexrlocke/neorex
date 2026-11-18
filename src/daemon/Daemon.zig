@@ -71,6 +71,9 @@ const focus_out_delay_ms = 80;
 /// How long a new split waits for the app to size it before trusting its terminal's size.
 const layout_wait_ms = 1000;
 
+/// How long exiting waits for Rex to put our labels back.
+const label_restore_wait_ms = 500;
+
 /// About how many cells a Rex floating pane's frame takes, across and down.
 /// Only a first guess: once made, its floats fit whatever size it is.
 const layer_frame = [2]i32{ 3, 2 };
@@ -78,6 +81,7 @@ const layer_frame = [2]i32{ 3, 2 };
 pub fn deinit(self: *Daemon) void {
     // before the panes hang up: the launching pane outlives us
     self.titles.restore(&self.panes, &self.rex);
+    self.rex.awaitLabels(label_restore_wait_ms);
     self.titles.deinit(self.gpa);
     self.panes.deinit(self.gpa, self.io);
     self.grids.deinit(self.gpa);
