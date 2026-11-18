@@ -446,6 +446,33 @@ api.nvim_create_autocmd('OptionSet', {
 })
 report_cmdheight()
 
+-- vim.g.neorex_config, the options (src/nvim/Options.zig): tell the daemon
+-- now, at VimEnter for an init.lua's, and on neorex.configure. The daemon
+-- reads the table and says what's wrong with it.
+local function report_options()
+  local config = vim.g.neorex_config
+  if config == nil then config = vim.NIL end
+  -- a table with functions in it can't be sent
+  local ok, err = pcall(vim.rpcnotify, chan, 'neorex_options', config)
+  if not ok then
+    vim.notify('neorex: vim.g.neorex_config: ' .. tostring(err), vim.log.levels.WARN)
+  end
+end
+if vim.v.vim_did_enter == 0 then
+  api.nvim_create_autocmd('VimEnter', { group = group, once = true, callback = report_options })
+end
+report_options()
+
+-- keep Rex's copy of neorex's actions (runtime/rex/neorex.lua) current
+pcall(function() require('neorex.prompt').install() end)
+
+-- Sets the options while Neovim runs: vim.g.neorex_config can't tell anyone
+-- it changed.
+function M.configure(config)
+  vim.g.neorex_config = config
+  report_options()
+end
+
 -- :q in the last window quits Neovim: make it the tab's only ordinary window
 -- first. If Neovim then refuses (unsaved changes), the daemon adopts it again.
 api.nvim_create_autocmd('QuitPre', {

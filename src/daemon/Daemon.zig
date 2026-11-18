@@ -12,6 +12,7 @@ const input = @import("../term/input.zig");
 const Nvim = @import("../nvim/Nvim.zig");
 const msgpack = @import("../nvim/msgpack.zig");
 const windows = @import("../nvim/windows.zig");
+const Options = @import("../nvim/Options.zig");
 const Forwarder = @import("../nvim/Forwarder.zig");
 const Grids = @import("../screen/Grids.zig");
 const FloatGroups = @import("../screen/FloatGroups.zig");
@@ -46,6 +47,8 @@ changes: WindowChanges = .{},
 titles: Titles = .{},
 /// Rex's tiled layout of the window holding our panes, as its last view had it.
 rex_layout: LayoutTree = .{},
+/// What `vim.g.neorex_config` last chose, as applied.
+options: Options = .default,
 /// Set by `stop`; `run` returns it.
 stopped: ?StopReason = null,
 
@@ -363,6 +366,8 @@ fn onNvim(self: *Daemon) !void {
                     try self.reconcile();
                     try self.draw();
                 }
+            } else if (std.mem.eql(u8, n.method, Options.method)) {
+                try self.onOptions(&params);
             } else if (try windows.parseNote(n.method, &params)) |note| switch (note) {
                 .current => |win| try self.onCurrent(win),
                 .float => |win| try self.onCurrentFloat(win),
@@ -403,6 +408,45 @@ fn onNvim(self: *Daemon) !void {
             }
         },
     };
+}
+
+/// The Lua sent `vim.g.neorex_config`: say what's wrong with it, and do
+/// what changed.
+fn onOptions(self: *Daemon, params: *msgpack.Decoder) !void {
+    var buf: [1024]u8 = undefined;
+    var problems: std.Io.Writer = .fixed(&buf);
+    const new = try Options.decode(params, &problems);
+    if (problems.end > 0) try warn(self.nvim.client, problems.buffered());
+    var effects: [Options.max_effects]Options.Effect = undefined;
+    for (Options.diff(self.options, new, &effects)) |e| switch (e) {
+        .vim_ui => |v| try setVimUi(self.nvim.client, @tagName(v.func), v.surface == .rex),
+        // each comes with the feature it turns on
+        .ui_option, .palette => {},
+    };
+    self.options = new;
+    try self.nvim.client.flush();
+}
+
+/// Hands `vim.ui.<func>` to Rex's palette, or gives back what it replaced.
+/// Without neorex's runtime on 'runtimepath' there's nothing to hand it to.
+fn setVimUi(nvim: *Nvim, func: []const u8, rex: bool) !void {
+    _ = try nvim.execLua(
+        \\local ok, ui = pcall(require, 'neorex.ui')
+        \\if ok then ui.set(...) end
+    , 2);
+    try msgpack.writeStr(nvim.writer(), func);
+    try msgpack.writeBool(nvim.writer(), rex);
+}
+
+/// Shows `lines`, one problem each, as a warning in Neovim.
+fn warn(nvim: *Nvim, lines: []const u8) !void {
+    _ = try nvim.execLua(
+        \\local text = ...
+        \\local out = {}
+        \\for line in text:gmatch('[^\n]+') do out[#out + 1] = 'neorex: ' .. line end
+        \\vim.notify(table.concat(out, '\n'), vim.log.levels.WARN)
+    , 1);
+    try msgpack.writeStr(nvim.writer(), lines);
 }
 
 /// Neovim resized a window and put it back: move its pane's borders in Rex

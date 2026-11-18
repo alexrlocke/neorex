@@ -195,6 +195,7 @@ pub fn parseChannel(result: *msgpack.Decoder) !i64 {
 const testing = std.testing;
 const Grids = @import("../screen/Grids.zig");
 const Grid = @import("../screen/Grid.zig");
+const Options = @import("Options.zig");
 
 /// A Neovim running windows.lua, and what it has said.
 const Harness = struct {
@@ -209,6 +210,11 @@ const Harness = struct {
     /// The windows a check waits for.
     want: i64 = 0,
     gone: i64 = 0,
+    /// The last options sent, how many have been, and their problems.
+    options: Options = .default,
+    options_sent: u32 = 0,
+    problems_buf: [512]u8 = undefined,
+    problems: []const u8 = "",
 
     fn deinit(h: *Harness) void {
         h.grids.deinit(testing.allocator);
@@ -231,6 +237,11 @@ const Harness = struct {
                     var params = n.params;
                     if (std.mem.eql(u8, n.method, "redraw")) {
                         _ = try h.grids.applyRedraw(gpa, &params);
+                    } else if (std.mem.eql(u8, n.method, Options.method)) {
+                        var problems: std.Io.Writer = .fixed(&h.problems_buf);
+                        h.options = try Options.decode(&params, &problems);
+                        h.problems = problems.buffered();
+                        h.options_sent += 1;
                     } else if (try parseNote(n.method, &params)) |note| switch (note) {
                         .title => |t| {
                             const name = try gpa.dupe(u8, t.name);
@@ -799,4 +810,73 @@ test "'cmdheight' is reported at setup and when it changes" {
             return lastCmdheight(x) == 2;
         }
     }.f));
+}
+
+/// A Neovim run with `extra` args, its Lua set up.
+fn optionsHarness(buf: []u8, comptime extra: []const []const u8) !Harness {
+    var h: Harness = .{ .nvim = Nvim.spawn(testing.io, &[_][]const u8{ "nvim", "--clean", "--embed", "-n" } ++ extra, buf) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    } };
+    errdefer h.deinit();
+    try h.nvim.uiAttach(60, 10, .{ .ext_multigrid = true });
+    h.chan_id = try askChannel(&h.nvim);
+    try h.nvim.flush();
+    return h;
+}
+
+test "options: set before startup, then changed while running" {
+    var buf: [1024]u8 = undefined;
+    var h = try optionsHarness(&buf, &.{ "--cmd", "lua vim.g.neorex_config = { cmdline = 'rex', ui = { select = 'rex' } }" });
+    defer h.deinit();
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return x.options.cmdline == .rex;
+        }
+    }.f));
+    try testing.expectEqual(Options{ .cmdline = .rex, .ui = .{ .select = .rex } }, h.options);
+    try testing.expectEqualStrings("", h.problems);
+
+    // configure replaces the whole table
+    try h.input(":lua neorex.configure({ palette = true })<CR>");
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return x.options.palette;
+        }
+    }.f));
+    try testing.expectEqual(Options{ .palette = true }, h.options);
+
+    try h.input(":lua neorex.configure(nil)<CR>");
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return !x.options.palette;
+        }
+    }.f));
+    try testing.expectEqual(Options.default, h.options);
+    try testing.expectEqualStrings("", h.problems);
+}
+
+test "options: set by init, after windows.lua may have run" {
+    var buf: [1024]u8 = undefined;
+    // -c runs just before VimEnter
+    var h = try optionsHarness(&buf, &.{ "-c", "lua vim.g.neorex_config = { confirm = 'rex' }" });
+    defer h.deinit();
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return x.options.confirm == .rex;
+        }
+    }.f));
+    try testing.expectEqual(Options{ .confirm = .rex }, h.options);
+}
+
+test "options: what's wrong reaches the daemon" {
+    var buf: [1024]u8 = undefined;
+    var h = try optionsHarness(&buf, &.{ "--cmd", "lua vim.g.neorex_config = { cmdline = 'tui', palette = true }" });
+    defer h.deinit();
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return x.options.palette;
+        }
+    }.f));
+    try testing.expectEqualStrings("neorex_config.cmdline: expected \"neovim\" or \"rex\", got \"tui\"\n", h.problems);
 }

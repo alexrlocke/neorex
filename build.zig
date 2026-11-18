@@ -34,7 +34,19 @@ pub fn build(b: *std.Build) void {
     // tests reach every file through main.zig's test block
     const exe_tests = b.addTest(.{ .root_module = exe.root_module });
     const test_step = b.step("test", "Run tests");
-    test_step.dependOn(&b.addRunArtifact(exe_tests).step);
+    const run_tests = b.addRunArtifact(exe_tests);
+    // src/lua_spec.zig runs test/lua from the repository's root; the Lua it
+    // reads is listed so that changing it runs the tests again
+    run_tests.setCwd(b.path("."));
+    for ([_][]const u8{
+        "runtime/lua/neorex/prompt.lua",
+        "runtime/lua/neorex/ui.lua",
+        "runtime/lua/neorex/pick.lua",
+        "runtime/lua/neorex/health.lua",
+        "runtime/rex/neorex.lua",
+        "test/lua/prompt_spec.lua",
+    }) |lua| run_tests.addFileInput(b.path(lua));
+    test_step.dependOn(&run_tests.step);
 
     // golden tests: renderer output through Ghostty's terminal emulator
     const golden = b.option(bool, "golden", "Run the golden tests too (downloads Ghostty)") orelse false;

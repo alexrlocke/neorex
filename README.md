@@ -6,11 +6,11 @@ One Neovim runs in the background behind all your panes, so buffers,
 registers, undo and language servers are shared. `:split` and `:vsplit` open
 real Rex panes where Neovim would put the window, and closing a pane in Rex
 closes its window. A popup is drawn either in the focused pane or in a Rex
-floating pane, never anything in between. Floats on the whole editor that
-you go into, such as pickers, and ones you can't go into, such as
-which-key and notifications, open in Rex floating panes, along with any
-floats attached to them. The completion menu, floats at the cursor or on a
-window, and statuslines are drawn inside the pane they belong to.
+floating pane. Floats on the whole editor that you go into, such as pickers,
+and ones you can't go into, such as which-key and notifications, open in Rex
+floating panes, along with any floats attached to them. The completion menu,
+floats at the cursor or on a window, and statuslines are drawn inside the pane
+they belong to.
 
 ![neorex demo](assets/demo.gif)
 
@@ -24,8 +24,9 @@ AI has been used heavily in building neorex due to limits on my available time. 
 
 - macOS or Linux
 - [Rex](https://www.superlogical.com/rex), with its setting to auto-balance
-  splits turned off. Otherwise Rex evens out every new split, so a sidebar
-  such as neo-tree opens at half the window instead of its own width.
+  splits turned off if you want layouts driven by Neovim. Otherwise Rex evens
+  out every new split, so a sidebar such as neo-tree opens at half the window
+  instead of its own width.
 - A recent Neovim. It's developed against 0.13-dev; older versions may show
   no statuslines.
 - Zig 0.17 to build from source
@@ -155,13 +156,102 @@ gives mini.statusline the same colors as the lualine theme.
 
 Plugins that set their own RGB colors keep them.
 
+## Pickers in Rex's command palette
+
+neorex can optionally use Rex's native pickers and inputs:
+`vim.ui.select` (LSP code actions and many plugins), `vim.ui.input` (LSP
+rename), a set of pickers (files, grep, LSP, diagnostics and more), and lists
+of your own. Each can be enabled in your Neovim config and is not used by
+default.
+
+Rex only lets an action from its own config use its prompts, so this needs one
+line in Rex's config, `~/.config/rex/init.lua`:
+
+```lua
+pcall(dofile, os.getenv("HOME") .. "/.local/state/neorex/rex.lua")
+```
+
+neorex writes that file each time it starts and has Rex reload it when it
+changes, so it always matches the neorex you run. `:checkhealth neorex` says
+whether Rex loads it and whether an app is connected to show prompts.
+
+The `vim.ui` replacements are off until you turn them on. Outside neorex this
+does nothing, so it needs no `if`:
+
+```lua
+vim.g.neorex_config = { ui = { select = "rex", input = "rex" } }
+```
+
+This takes precedence over plugins that replace `vim.ui.select` as Neovim
+starts, such as snacks.nvim's picker, which then asks when no Rex app can. A
+replacement made later, after startup, is left alone. To change the options
+while Neovim runs, call `neorex.configure({ ... })`.
+
+Map the pickers you want in Rex. They use snacks.nvim's picker names, so
+moving a key over means changing `Snacks.picker.<name>` to
+`pick.<name>`:
+
+```lua
+if vim.g.neorex then
+  local pick = require("neorex.pick")
+  vim.keymap.set("n", "<leader>ff", pick.files)
+  vim.keymap.set("n", "<leader>fb", pick.buffers)
+  vim.keymap.set("n", "<leader>sg", pick.grep)
+  vim.keymap.set("n", "grr", pick.lsp_references)
+end
+```
+
+| Picker | Lists | Choosing one |
+|---|---|---|
+| `files` | git's files, or ripgrep's outside a repository; `files({ cmd = { "fd", "--type", "f", "--hidden" } })` lists with your own command | opens it |
+| `git_files` | files git tracks | opens it |
+| `git_status` | changed and untracked files, with their status | opens it |
+| `recent` | `v:oldfiles` that still exist | opens it |
+| `buffers` | listed buffers | goes to it |
+| `grep` | asks what to search for, then lists the matches (ripgrep, else `git grep`) | goes to it |
+| `grep_word` | matches for the word under the cursor | goes to it |
+| `lines` | the buffer's lines | goes to it |
+| `lsp_definitions`, `lsp_declarations`, `lsp_type_definitions` | as `vim.lsp.buf`'s: a single result is gone to without asking | goes to it |
+| `lsp_references`, `lsp_implementations` | as `vim.lsp.buf`'s | goes to it |
+| `lsp_symbols` | the buffer's symbols | goes to it |
+| `lsp_workspace_symbols` | asks for a query, then lists matching symbols | goes to it |
+| `diagnostics`, `diagnostics_buffer` | every buffer's, or this buffer's, errors first | goes to it |
+| `qflist`, `loclist` | the quickfix or location list | goes to it |
+| `marks` | marks a-z, A-Z and 0-9 | goes to it |
+| `jumps` | the jumplist, most recent first | goes to it |
+| `registers` | registers that hold something | puts it after the cursor |
+| `command_history` | commands run before | runs it again |
+| `search_history` | searches made before | searches again |
+| `commands` | Ex commands | runs a user command that takes no arguments; starts typing any other |
+| `colorschemes` | installed colorschemes | applies it |
+
+Going to a location leaves a mark in the jumplist, and the LSP pickers put
+where you came from on the tag stack, so `CTRL-T` goes back. Grep asks for
+the whole query, then lists the matches: Rex's palette can't search as you
+type, or preview. Rex shows at most 2,000 items and takes at most 64 KiB in one
+question, which is often fewer: around 700 files. A longer list asks for part of
+a name first, then lists what matches; if that is still too many, it lists the
+first that fit, and its title says how many, such as "Files: model (first 650
+of 900)".
+
+For a list of your own, call `require("neorex.ui").select`. It takes
+`vim.ui.select`'s arguments, and `opts.rex` adds what only Rex shows:
+`title`, `subtitle` and `detail` (functions of an item), `icon`, `placeholder`,
+`multiple` (choose several: the callback gets a list) and `allow_other`
+(answer with typed text).
+
+If no connected Rex app can show a prompt, Neovim asks instead. Anything else
+that stops Rex asking, such as Rex already asking something or its config not
+loading neorex's actions, shows a message and asks nothing.
+
 ## Current limitations
 
 - The `<C-w>` resize, swap and move commands do nothing. Use Rex's own pane
-  controls instead.
+  controls instead. This is intentional for now: I recommend using Rex's window
+  management commands, which I find are just better than Neovim's.
 - Plugins that arrange windows (sidebars, layout managers) don't get the
-  placement they expect.
-- Only one tab page: Neovim tab pages aren't Rex tabs.
+  placement they expect: Rex decides where panes go (see above).
+- Only one tab page: Neovim tab pages aren't Rex tabs (for now...).
 - No external command line or messages: long messages still show
   "Press ENTER".
 - No global statusline: neorex sets `laststatus=3` to `2`, so each pane shows
