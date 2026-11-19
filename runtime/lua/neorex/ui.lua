@@ -11,10 +11,9 @@ local M = {}
 local replaced = {}
 
 -- An icon for vim.ui.select's `kind`, which callers set to say what they list.
--- Files get none: the same icon on every row costs room that Rex's size
--- limit gives to more files.
 local icons = {
   codeaction = 'code',
+  file = 'document',
   buffer = 'document',
   color = 'star',
 }

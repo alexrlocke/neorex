@@ -228,10 +228,11 @@ end)
 
 test('run: a list bigger than Rex takes sends the first items that fit, and says so', function()
   rex_answers({ ids = { '1' } })
-  -- 2,000 items of about 90 bytes is about 180 KB: well over Rex's 64 KiB
+  -- 2,000 items of about 690 bytes is about 1.4 MB: well over Rex's 1 MiB
+  local deep = string.rep('deep/', 120) .. '<path>'
   local items = {}
   for i = 1, 2000 do
-    items[i] = { id = tostring(i), title = ('file_%04d.rb'):format(i), subtitle = 'app/models/concerns/some/deep/<path>', icon = 'document' }
+    items[i] = { id = tostring(i), title = ('file_%04d.rb'):format(i), subtitle = deep, icon = 'document' }
   end
   eq({ ids = { '1' } }, run('pick', { title = 'Files', items = items }))
   local stdin = read('stdin')
@@ -239,7 +240,7 @@ test('run: a list bigger than Rex takes sends the first items that fit, and says
   local _, specials = stdin:gsub('[<>&]', '')
   local size = #stdin + 5 * specials
   assert(size <= prompt.max_bytes, ('sent %d bytes'):format(size))
-  assert(size > prompt.max_bytes - 200, ('sent only %d bytes'):format(size))
+  assert(size > prompt.max_bytes - 1000, ('sent only %d bytes'):format(size))
   local p = sent().args.prompt
   assert(#p.items > 100 and #p.items < 2000, #p.items)
   eq(('Files (first %d of 2000)'):format(#p.items), p.title)
@@ -377,10 +378,10 @@ test('filter: every word, in title, subtitle or detail, ignoring case unless cap
   eq({ '1', '2', '3' }, ids(''))
 end)
 
--- 2,000 paths, too many for Rex's 64 KiB, and the opts files use.
+-- 2,500 paths, more than Rex lists, and the opts files use.
 local function many()
   local paths = {}
-  for i = 1, 2000 do
+  for i = 1, 2500 do
     paths[i] = ('packs/pack_%04d/app/models/%s.rb'):format(i, i == 1500 and 'needle_model' or 'model')
   end
   return paths, {
@@ -400,7 +401,7 @@ test('ui.select: a list too big for Rex asks for a search term, then lists the m
   eq({ paths[1500], 1500 }, choose(paths, opts, ui.select))
   local ask = vim.json.decode(read('stdin.1')).args
   eq('input', ask.kind)
-  eq({ title = 'Files', placeholder = 'Too many to list (2000): type part of one' }, ask.prompt)
+  eq({ title = 'Files', placeholder = 'Too many to list (2500): type part of one' }, ask.prompt)
   local p = vim.json.decode(read('stdin.2')).args.prompt
   eq('Files: needle', p.title)
   eq({ { id = '1500', title = 'needle_model.rb', subtitle = 'packs/pack_1500/app/models' } }, p.items)
@@ -413,7 +414,7 @@ test('ui.select: a search term that still matches too many lists the first that 
   local paths, opts = many()
   eq({ 'nil', 'nil' }, choose(paths, opts, ui.select))
   local p = vim.json.decode(read('stdin.2')).args.prompt
-  assert(p.title:match('^Files: model %(first %d+ of 2000%)$'), p.title)
+  assert(p.title:match('^Files: model %(first 2000 of 2500%)$'), p.title)
 end)
 
 test('ui.select: a list too big for Rex: closing, no match, and no app', function()
@@ -429,7 +430,7 @@ test('ui.select: a list too big for Rex: closing, no match, and no app', functio
   eq('neorex: nothing matches nothing like this', notes[1].msg)
   rex_answers({ failed = 'no_client' })
   eq({ paths[1], 1 }, choose(paths, opts, ui.select), 'no app')
-  eq(2000, #before.select[1], 'Neovim lists them all')
+  eq(2500, #before.select[1], 'Neovim lists them all')
 end)
 
 test('ui.input: Rex answers, closes, or has no app to ask', function()
@@ -538,8 +539,8 @@ test('pick.files: opens the chosen file', function()
     title = 'Files',
     placeholder = 'File',
     items = {
-      { id = '1', title = 'build.zig' },
-      { id = '2', title = 'main.zig', subtitle = 'src' },
+      { id = '1', title = 'build.zig', icon = 'document' },
+      { id = '2', title = 'main.zig', subtitle = 'src', icon = 'document' },
     },
   }, sent().args.prompt)
 end)
