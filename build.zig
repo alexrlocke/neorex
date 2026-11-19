@@ -13,6 +13,13 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
+    const term_mod = b.createModule(.{
+        .root_source_file = b.path("src/term/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+
     const exe = b.addExecutable(.{
         .name = "neorex",
         .root_module = b.createModule(.{
@@ -26,6 +33,7 @@ pub fn build(b: *std.Build) void {
     });
 
     exe.root_module.addImport("rex", rex_mod);
+    exe.root_module.addImport("term", term_mod);
 
     b.installArtifact(exe);
     // the colorscheme and lualine theme; neorex finds them from its own path
@@ -63,6 +71,11 @@ pub fn build(b: *std.Build) void {
     const run_rex = b.addRunArtifact(rex_tests);
     test_step.dependOn(&run_rex.step);
     b.step("test-rex", "Run rex tests").dependOn(&run_rex.step);
+
+    const term_tests = b.addTest(.{ .root_module = term_mod });
+    const run_term = b.addRunArtifact(term_tests);
+    test_step.dependOn(&run_term.step);
+    b.step("test-term", "Run term tests").dependOn(&run_term.step);
 
     // golden tests: renderer output through Ghostty's terminal emulator
     const golden = b.option(bool, "golden", "Run the golden tests too (downloads Ghostty)") orelse false;

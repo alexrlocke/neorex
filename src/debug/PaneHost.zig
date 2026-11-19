@@ -3,11 +3,11 @@
 
 const std = @import("std");
 const net = std.Io.net;
-const Terminal = @import("../term/Terminal.zig");
 const Loop = @import("../daemon/loop.zig").Loop;
-const input = @import("../term/input.zig");
 const fdpass = @import("../daemon/fdpass.zig");
 const pane = @import("../daemon/pane_helper.zig");
+
+const term = @import("term");
 
 const PaneHost = @This();
 
@@ -26,8 +26,8 @@ next_id: u32 = 1,
 const Pane = struct {
     id: u32,
     stream: net.Stream,
-    term: Terminal,
-    parser: input.Parser = .{},
+    terminal: term.Terminal,
+    parser: term.input.Parser = .{},
 };
 
 const Source = enum(u1) { socket, tty };
@@ -76,17 +76,17 @@ pub fn accept(self: *PaneHost, io: std.Io, loop: *const Loop, server: *net.Serve
     const i = for (self.panes, 0..) |p, i| {
         if (p == null) break i;
     } else return error.TooManyPanes;
-    self.panes[i] = .{ .id = self.next_id, .stream = stream, .term = try .init(tty, &self.out_bufs[i]) };
+    self.panes[i] = .{ .id = self.next_id, .stream = stream, .terminal = try .init(tty, &self.out_bufs[i]) };
     self.next_id += 1;
 
     const p = &self.panes[i].?;
     try loop.addRead(stream.socket.handle, self.base + 2 * i + @backingInt(Source.socket));
     try loop.addRead(tty, self.base + 2 * i + @backingInt(Source.tty));
     std.debug.print("pane {d}: attached\n", .{p.id});
-    try p.term.writer.print("\x1b[H\x1b[2Jneorex pane {d}, driven by {s}.\r\n", .{ p.id, self.name });
+    try p.terminal.writer.print("\x1b[H\x1b[2Jneorex pane {d}, driven by {s}.\r\n", .{ p.id, self.name });
     try printSize(p);
-    try p.term.writer.writeAll("Type to see events. q closes this pane.\r\n");
-    try p.term.flush();
+    try p.terminal.writer.writeAll("Type to see events. q closes this pane.\r\n");
+    try p.terminal.flush();
 }
 
 /// A message from the helper. False when it hung up.
@@ -99,36 +99,36 @@ fn onMessage(io: std.Io, p: *Pane) !bool {
         .resized => try printSize(p),
         else => {},
     };
-    try p.term.flush();
+    try p.terminal.flush();
     return true;
 }
 
 /// Keys typed in the pane. False on q.
 fn onInput(p: *Pane) !bool {
     var buf: [4096]u8 = undefined;
-    const n = std.c.read(p.term.fd, &buf, buf.len);
+    const n = std.c.read(p.terminal.fd, &buf, buf.len);
     if (n <= 0) return false;
     p.parser.feed(buf[0..@intCast(n)]);
     while (p.parser.next()) |event| {
         if (event == .key and event.key.key == .codepoint and event.key.key.codepoint == 'q' and @as(u8, @bitCast(event.key.mods)) == 0) return false;
-        try p.term.writer.print("  {f}\r\n", .{event});
+        try p.terminal.writer.print("  {f}\r\n", .{event});
     }
-    try p.term.flush();
+    try p.terminal.flush();
     return true;
 }
 
 fn printSize(p: *Pane) !void {
-    const ws = try p.term.size();
-    try p.term.writer.print("size {d}x{d}\r\n", .{ ws.col, ws.row });
+    const ws = try p.terminal.size();
+    try p.terminal.writer.print("size {d}x{d}\r\n", .{ ws.col, ws.row });
 }
 
 /// Restores the terminal and hangs up, so the helper exits. A remove that
 /// fails means accept failed before adding that fd, so it's ignored.
 fn close(io: std.Io, loop: *const Loop, p: *Pane, slot: *?Pane) void {
     loop.remove(p.stream.socket.handle) catch {};
-    loop.remove(p.term.fd) catch {};
-    p.term.deinit();
-    _ = std.c.close(p.term.fd);
+    loop.remove(p.terminal.fd) catch {};
+    p.terminal.deinit();
+    _ = std.c.close(p.terminal.fd);
     p.stream.close(io);
     slot.* = null;
 }

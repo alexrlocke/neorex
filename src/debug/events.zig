@@ -3,29 +3,28 @@
 
 const std = @import("std");
 const Writer = std.Io.Writer;
-const Terminal = @import("../term/Terminal.zig");
-const Signals = @import("../term/Signals.zig");
-const input = @import("../term/input.zig");
 const msgpack = @import("../nvim/msgpack.zig");
 const rpc = @import("../nvim/rpc.zig");
 const Nvim = @import("../nvim/Nvim.zig");
 const runtime = @import("../nvim/runtime.zig");
 const Forwarder = @import("../nvim/Forwarder.zig");
 
+const term = @import("term");
+
 // no alternate screen, so the events stay in scrollback
-const modes_on = "\x1b[?2004h\x1b[?1004h" ++ input.kitty_push;
-const modes_off = input.kitty_pop ++ "\x1b[?1004l\x1b[?2004l";
+const modes_on = "\x1b[?2004h\x1b[?1004h" ++ term.input.kitty_push;
+const modes_off = term.input.kitty_pop ++ "\x1b[?1004l\x1b[?2004l";
 
 /// Runs `nvim --embed` plus `nvim_args`.
 pub fn run(gpa: std.mem.Allocator, io: std.Io, nvim_args: []const []const u8) !void {
     var out_buf: [16 * 1024]u8 = undefined;
-    var term = try Terminal.init(std.posix.STDIN_FILENO, &out_buf);
-    defer term.deinit();
+    var terminal = try term.Terminal.init(std.posix.STDIN_FILENO, &out_buf);
+    defer terminal.deinit();
 
-    var signals = try Signals.init(&.{.WINCH});
+    var signals = try term.Signals.init(&.{.WINCH});
     defer signals.deinit();
 
-    const out = &term.writer;
+    const out = &terminal.writer;
     try out.writeAll(modes_on);
     defer out.writeAll(modes_off) catch {};
 
@@ -39,16 +38,16 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, nvim_args: []const []const u8) !v
     var nvim = try Nvim.spawn(io, argv.items, &nvim_buf);
     defer nvim.deinit(gpa);
 
-    const ws = try term.size();
+    const ws = try terminal.size();
     try nvim.uiAttach(ws.col, ws.row, .{});
     try out.print("debug-events: attached at {d}x{d}. Ctrl+Q or :q quits.\r\n", .{ ws.col, ws.row });
-    try term.flush();
+    try terminal.flush();
 
     var forwarder: Forwarder = .{};
     var buf: [4096]u8 = undefined;
     while (true) {
         var fds = [_]std.c.pollfd{
-            .{ .fd = term.fd, .events = std.c.POLL.IN, .revents = 0 },
+            .{ .fd = terminal.fd, .events = std.c.POLL.IN, .revents = 0 },
             .{ .fd = signals.read_fd, .events = std.c.POLL.IN, .revents = 0 },
             .{ .fd = nvim.readFd(), .events = std.c.POLL.IN, .revents = 0 },
         };
@@ -61,7 +60,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, nvim_args: []const []const u8) !v
         if (fds[1].revents != 0) {
             const fired = try signals.drain();
             if (fired.contains(.WINCH)) {
-                const size = try term.size();
+                const size = try terminal.size();
                 try nvim.uiTryResize(size.col, size.row);
             }
         }
@@ -72,11 +71,11 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, nvim_args: []const []const u8) !v
                 return;
             }
             while (try nvim.next()) |msg| try printMessage(&nvim, out, msg);
-            try term.flush();
+            try terminal.flush();
         }
 
         if (fds[0].revents != 0) {
-            const n = std.c.read(term.fd, &buf, buf.len);
+            const n = std.c.read(terminal.fd, &buf, buf.len);
             if (n < 0) {
                 if (std.c.errno(n) == .INTR) continue;
                 return error.ReadFailed;

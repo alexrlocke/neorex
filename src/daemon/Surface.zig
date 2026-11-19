@@ -4,16 +4,16 @@
 const std = @import("std");
 const net = std.Io.net;
 
-const Terminal = @import("../term/Terminal.zig");
-const modes = @import("../term/modes.zig");
 const Forwarder = @import("../nvim/Forwarder.zig");
 const PaneView = @import("../screen/PaneView.zig");
+
+const term = @import("term");
 
 const Surface = @This();
 
 /// Closing it makes the helper exit, and Rex close the pane.
 helper_socket: net.Stream,
-terminal: Terminal,
+terminal: term.Terminal,
 view: PaneView = .init(0, 0),
 forwarder: Forwarder = .{
     .ctrl_q_quits = false,
@@ -27,11 +27,11 @@ pub fn create(gpa: std.mem.Allocator, helper_socket: net.Stream, tty: std.posix.
     errdefer gpa.destroy(self);
     self.* = .{
         .helper_socket = helper_socket,
-        .terminal = try Terminal.init(tty, &self.out_buf),
+        .terminal = try term.Terminal.init(tty, &self.out_buf),
     };
     errdefer self.terminal.deinit();
 
-    try self.terminal.writer.writeAll(modes.editor_on);
+    try self.terminal.writer.writeAll(term.modes.editor_on);
     const ws = try self.terminal.size();
     self.view = .init(ws.col, ws.row);
     return self;
@@ -40,7 +40,7 @@ pub fn create(gpa: std.mem.Allocator, helper_socket: net.Stream, tty: std.posix.
 /// `restore` is false when the terminal is already gone.
 pub fn destroy(self: *Surface, gpa: std.mem.Allocator, io: std.Io, restore: bool) void {
     if (restore) {
-        self.terminal.writer.writeAll(modes.editor_off) catch {};
+        self.terminal.writer.writeAll(term.modes.editor_off) catch {};
         self.terminal.deinit();
     }
     _ = std.c.close(self.terminal.fd);

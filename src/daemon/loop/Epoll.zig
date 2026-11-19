@@ -10,7 +10,7 @@ const std = @import("std");
 const linux = std.os.linux;
 const EPOLL = linux.EPOLL;
 const fd_t = std.posix.fd_t;
-const Signals = @import("../../term/Signals.zig");
+const Signals = @import("term").Signals;
 
 const Epoll = @This();
 
