@@ -2,7 +2,7 @@
 //! order. A plain value: only the Surface needs a stable address.
 
 const std = @import("std");
-const ids = @import("../rex/ids.zig");
+const ids = @import("rex").ids;
 const Surface = @import("Surface.zig");
 const Loop = @import("loop.zig").Loop;
 const FloatGroups = @import("../screen/FloatGroups.zig");

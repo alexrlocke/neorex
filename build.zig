@@ -5,6 +5,14 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const strip = b.option(bool, "strip", "Strip debug info from the binary");
 
+    // modules, leaves first; each lists what it may import
+    const rex_mod = b.createModule(.{
+        .root_source_file = b.path("src/rex/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+
     const exe = b.addExecutable(.{
         .name = "neorex",
         .root_module = b.createModule(.{
@@ -16,6 +24,9 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
+
+    exe.root_module.addImport("rex", rex_mod);
+
     b.installArtifact(exe);
     // the colorscheme and lualine theme; neorex finds them from its own path
     // (src/nvim/runtime.zig), so every install keeps this layout
@@ -47,6 +58,11 @@ pub fn build(b: *std.Build) void {
         "test/lua/prompt_spec.lua",
     }) |lua| run_tests.addFileInput(b.path(lua));
     test_step.dependOn(&run_tests.step);
+
+    const rex_tests = b.addTest(.{ .root_module = rex_mod });
+    const run_rex = b.addRunArtifact(rex_tests);
+    test_step.dependOn(&run_rex.step);
+    b.step("test-rex", "Run rex tests").dependOn(&run_rex.step);
 
     // golden tests: renderer output through Ghostty's terminal emulator
     const golden = b.option(bool, "golden", "Run the golden tests too (downloads Ghostty)") orelse false;

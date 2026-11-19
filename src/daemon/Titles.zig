@@ -6,11 +6,11 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const Client = @import("../rex/Client.zig");
-const RexSession = @import("../rex/Session.zig");
 const windows = @import("../nvim/windows.zig");
 const Pane = @import("Pane.zig");
 const Panes = @import("Panes.zig");
+
+const rex = @import("rex");
 
 const Titles = @This();
 
@@ -56,8 +56,8 @@ pub fn forget(self: *Titles, gpa: Allocator, win: i64) void {
 
 /// Reads a view's window `w`, the one holding our panes: its label, and
 /// the launching pane's.
-pub fn readWindow(self: *Titles, gpa: Allocator, panes: *const Panes, rex: *const RexSession, w: std.json.Value) void {
-    const id = Client.getStr(w, "window_id") orelse return;
+pub fn readWindow(self: *Titles, gpa: Allocator, panes: *const Panes, rex_session: *const rex.Session, w: std.json.Value) void {
+    const id = rex.Client.getStr(w, "window_id") orelse return;
     if (id.len != 43) return;
     if (self.window) |*known| if (!std.mem.eql(u8, known, id)) {
         // our panes moved to another window: name that one afresh
@@ -66,15 +66,15 @@ pub fn readWindow(self: *Titles, gpa: Allocator, panes: *const Panes, rex: *cons
         self.window_label = null;
     };
     self.window = id[0..43].*;
-    self.readWindowLabel(rex, Client.getStr(w, "label") orelse "");
-    if (Client.get(w, "layers")) |layers| if (layers == .array) for (layers.array.items) |layer| {
+    self.readWindowLabel(rex_session, rex.Client.getStr(w, "label") orelse "");
+    if (rex.Client.get(w, "layers")) |layers| if (layers == .array) for (layers.array.items) |layer| {
         self.readLaunchLabel(gpa, panes, layer);
     };
 }
 
 /// A label we didn't give the window means the user named it.
-fn readWindowLabel(self: *Titles, rex: *const RexSession, label: []const u8) void {
-    if (self.window_named or rex.windowLabelLanding()) return;
+fn readWindowLabel(self: *Titles, rex_session: *const rex.Session, label: []const u8) void {
+    if (self.window_named or rex_session.windowLabelLanding()) return;
     const w = if (self.window) |*w| w else return;
     if (defaultWindowLabel(w, label)) return;
     if (self.window_label) |l| if (std.mem.eql(u8, l, label)) return;
@@ -87,24 +87,24 @@ fn readLaunchLabel(self: *Titles, gpa: Allocator, panes: *const Panes, layer: st
     if (self.launch_label_read) return;
     const launch = panes.byId(startup_pane_id) orelse return;
     const block: []const u8 = if (launch.rex_block) |*b| b else return;
-    const blocks = Client.get(layer, "blocks") orelse return;
+    const blocks = rex.Client.get(layer, "blocks") orelse return;
     if (blocks != .array) return;
     for (blocks.array.items) |b| {
-        if (!std.mem.eql(u8, Client.getStr(b, "block_id") orelse "", block)) continue;
+        if (!std.mem.eql(u8, rex.Client.getStr(b, "block_id") orelse "", block)) continue;
         self.launch_label_read = true;
-        if (Client.getStr(b, "label")) |l| self.launch_label = gpa.dupe(u8, l) catch null;
+        if (rex.Client.getStr(b, "label")) |l| self.launch_label = gpa.dupe(u8, l) catch null;
         return;
     }
 }
 
 /// Names every pane after its window's file, and the tab after the
 /// current window's, where they changed.
-pub fn sync(self: *Titles, gpa: Allocator, panes: *Panes, rex: *RexSession, current_win: i64) !void {
-    for (panes.list.items) |*p| try self.syncPane(gpa, p, rex);
-    try self.syncWindow(gpa, rex, current_win);
+pub fn sync(self: *Titles, gpa: Allocator, panes: *Panes, rex_session: *rex.Session, current_win: i64) !void {
+    for (panes.list.items) |*p| try self.syncPane(gpa, p, rex_session);
+    try self.syncWindow(gpa, rex_session, current_win);
 }
 
-fn syncPane(self: *Titles, gpa: Allocator, p: *Pane, rex: *RexSession) !void {
+fn syncPane(self: *Titles, gpa: Allocator, p: *Pane, rex_session: *rex.Session) !void {
     if (p.layer != null or p.closing != null) return;
     const win = p.neovim_window_handle orelse return;
     const name = self.names.get(win) orelse return;
@@ -118,7 +118,7 @@ fn syncPane(self: *Titles, gpa: Allocator, p: *Pane, rex: *RexSession) !void {
     const label = p.label.?;
     // the launching pane's own label first, to put back
     if (!p.labeled and (p.id != startup_pane_id or self.launch_label_read)) if (p.rex_block) |*b| {
-        try rex.setBlockLabel(b, label);
+        try rex_session.setBlockLabel(b, label);
         p.labeled = true;
     };
     if (!p.titled) if (p.terminal_surface) |s| {
@@ -129,28 +129,28 @@ fn syncPane(self: *Titles, gpa: Allocator, p: *Pane, rex: *RexSession) !void {
     };
 }
 
-fn syncWindow(self: *Titles, gpa: Allocator, rex: *RexSession, current_win: i64) !void {
+fn syncWindow(self: *Titles, gpa: Allocator, rex_session: *rex.Session, current_win: i64) !void {
     // not before a view has shown its label, so a user's name is never replaced
-    if (self.window_named or self.window == null or rex.conn == .closed) return;
+    if (self.window_named or self.window == null or rex_session.conn == .closed) return;
     const name = self.names.get(current_win) orelse return;
     if (self.window_label) |l| if (std.mem.eql(u8, l, name)) return;
     const label = try gpa.dupe(u8, name);
     if (self.window_label) |l| gpa.free(l);
     self.window_label = label;
-    try rex.setWindowLabel(label);
+    try rex_session.setWindowLabel(label);
 }
 
 /// Puts back what outlives us: the launching pane's label and title, and
 /// the tab's default name.
-pub fn restore(self: *Titles, panes: *Panes, rex: *RexSession) void {
-    if (self.window_label != null and !self.window_named) rex.setWindowLabel("") catch {};
+pub fn restore(self: *Titles, panes: *Panes, rex_session: *rex.Session) void {
+    if (self.window_label != null and !self.window_named) rex_session.setWindowLabel("") catch {};
     const p = panes.byId(startup_pane_id) orelse return;
     if (p.closing == .rex_pane_closed) return;
     // the shell sets its own title again at its next prompt
     if (p.titled) if (p.terminal_surface) |s| writeTitle(&s.terminal.writer, "") catch {};
     if (!p.labeled) return;
     const block: []const u8 = if (p.rex_block) |*b| b else return;
-    rex.setBlockLabel(block, self.launch_label orelse "") catch {};
+    rex_session.setBlockLabel(block, self.launch_label orelse "") catch {};
 }
 
 /// OSC 2. `title` has no control characters: the Lua strips them.

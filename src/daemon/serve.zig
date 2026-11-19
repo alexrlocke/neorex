@@ -7,13 +7,13 @@ const std = @import("std");
 const net = std.Io.net;
 const Nvim = @import("../nvim/Nvim.zig");
 const runtime = @import("../nvim/runtime.zig");
-const Client = @import("../rex/Client.zig");
-const rex_server = @import("../rex/server.zig");
 const Loop = @import("loop.zig").Loop;
 const Daemon = @import("Daemon.zig");
 const Pane = @import("Pane.zig");
 const Surface = @import("Surface.zig");
 const pane = @import("pane_helper.zig");
+
+const rex = @import("rex");
 
 /// Longest path a Unix socket takes on macOS, less one for the terminator.
 pub const max_path = 103;
@@ -45,7 +45,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, base: []const u8, nvim_args: []co
     const log = try path(&log_buf, base, ".log");
     const session_id = env("REX_SESSION") orelse return error.NotInRex;
     // before the ready byte, so the launcher reports a missing server
-    const rex_url = rex_server.url(gpa, io) catch |err| {
+    const rex_url = rex.server.url(gpa, io) catch |err| {
         std.debug.print("neorex daemon: no Rex server: REX_SERVER is unset and `rex server status` gave no endpoint\n", .{});
         return err;
     };
@@ -93,22 +93,22 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, base: []const u8, nvim_args: []co
     var nvim = try Nvim.connectRetry(io, nvim_sock, &nvim_buf);
     defer nvim.deinit(gpa);
     var rex_buf: [16 * 1024]u8 = undefined;
-    var rex: Client = try .connect(gpa, io, rex_url, &rex_buf);
-    defer rex.deinit(gpa);
+    var rex_client: rex.Client = try .connect(gpa, io, rex_url, &rex_buf);
+    defer rex_client.deinit(gpa);
 
     var loop: Loop = try .init();
     defer loop.deinit();
     for ([_]std.c.SIG{ .TERM, .INT, .HUP }) |sig| try loop.addSignal(sig, @backingInt(Daemon.Token.signal));
     try loop.addRead(nvim.readFd(), @backingInt(Daemon.Token.nvim_socket));
     try loop.addRead(server.socket.handle, @backingInt(Daemon.Token.helper_listener));
-    try loop.addRead(rex.fd(), @backingInt(Daemon.Token.rex_socket));
+    try loop.addRead(rex_client.fd(), @backingInt(Daemon.Token.rex_socket));
 
     var d: Daemon = .{
         .gpa = gpa,
         .io = io,
         .loop = &loop,
         .nvim = .{ .client = &nvim },
-        .rex = .{ .gpa = gpa, .client = &rex, .session_id = session_id },
+        .rex_session = .{ .gpa = gpa, .client = &rex_client, .session_id = session_id },
         .exe = exe,
         .sock = sock,
     };

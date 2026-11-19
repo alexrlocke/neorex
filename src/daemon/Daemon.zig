@@ -17,19 +17,17 @@ const Forwarder = @import("../nvim/Forwarder.zig");
 const Grids = @import("../screen/Grids.zig");
 const FloatGroups = @import("../screen/FloatGroups.zig");
 const PaneView = @import("../screen/PaneView.zig");
-const Client = @import("../rex/Client.zig");
-const layout = @import("../rex/layout.zig");
-const LayoutTree = @import("../rex/LayoutTree.zig");
 const Loop = @import("loop.zig").Loop;
 const Pane = @import("Pane.zig");
 const Panes = @import("Panes.zig");
-const RexSession = @import("../rex/Session.zig");
 const NvimSession = @import("NvimSession.zig");
 const WindowChanges = @import("WindowChanges.zig");
 const Titles = @import("Titles.zig");
 const Surface = @import("Surface.zig");
 const pane_helper = @import("pane_helper.zig");
 const sizing = @import("sizing.zig");
+
+const rex = @import("rex");
 
 const Daemon = @This();
 
@@ -41,12 +39,12 @@ exe: []const u8,
 sock: []const u8,
 grids: Grids = .{},
 panes: Panes = .{},
-rex: RexSession,
+rex_session: rex.Session,
 nvim: NvimSession,
 changes: WindowChanges = .{},
 titles: Titles = .{},
 /// Rex's tiled layout of the window holding our panes, as its last view had it.
-rex_layout: LayoutTree = .{},
+rex_layout: rex.LayoutTree = .{},
 /// What `vim.g.neorex_config` last chose, as applied.
 options: Options = .default,
 /// Set by `stop`; `run` returns it.
@@ -80,13 +78,13 @@ const layer_frame = [2]i32{ 3, 2 };
 
 pub fn deinit(self: *Daemon) void {
     // before the panes hang up: the launching pane outlives us
-    self.titles.restore(&self.panes, &self.rex);
+    self.titles.restore(&self.panes, &self.rex_session);
     self.titles.deinit(self.gpa);
     self.panes.deinit(self.gpa, self.io);
     self.grids.deinit(self.gpa);
     self.changes.deinit(self.gpa);
     self.rex_layout.deinit(self.gpa);
-    self.rex.deinit();
+    self.rex_session.deinit();
     self.* = undefined;
 }
 
@@ -101,7 +99,7 @@ pub fn start(self: *Daemon, launch_pane: Pane) !void {
     try pane.registerWith(self.loop);
     const view = pane.terminal_surface.?.view;
     try self.nvim.attachUi(view.cols, view.rows);
-    try self.rex.attach();
+    try self.rex_session.attach();
 }
 
 /// Runs the loop until something calls `stop`, returns why.
@@ -157,7 +155,7 @@ fn handle(self: *Daemon, e: Loop.Event) !void {
 /// moment, in case another pane gains it.
 fn afterBatch(self: *Daemon) !void {
     try self.sendFocus(false);
-    try self.titles.sync(self.gpa, &self.panes, &self.rex, self.nvim.current_win);
+    try self.titles.sync(self.gpa, &self.panes, &self.rex_session, self.nvim.current_win);
 }
 
 fn sendFocus(self: *Daemon, waited: bool) !void {
@@ -263,7 +261,7 @@ fn onInput(self: *Daemon, pane: *Pane) !void {
     const bytes = buf[0..n];
     if (self.typedIntoUnfocusedPane(pane, bytes)) {
         try self.makeCurrent(pane);
-        try self.rex.focus(pane.rex_block);
+        try self.rex_session.focus(pane.rex_block);
     }
 
     // a floating pane's default grid is set as it draws
@@ -276,12 +274,12 @@ fn onInput(self: *Daemon, pane: *Pane) !void {
 fn typedIntoUnfocusedPane(self: *const Daemon, pane: *const Pane, bytes: []const u8) bool {
     const win = pane.neovim_window_handle orelse return false;
     return win != self.nvim.current_win and
-        !self.rex.hasFocused(pane.rex_block) and
+        !self.rex_session.hasFocused(pane.rex_block) and
         !input.onlyFocusReports(bytes);
 }
 
 fn newPane(self: *Daemon, win: i64) !void {
-    if (self.rex.conn == .closed) return; // no Rex: the window stays in Neovim
+    if (self.rex_session.conn == .closed) return; // no Rex: the window stays in Neovim
     const sp = self.changes.splitOf(win);
     const fixed = self.fixedPlace(sp);
     // a fixed-size window at the edge of our panes; else beside the window it came
@@ -304,8 +302,8 @@ fn newPane(self: *Daemon, win: i64) !void {
 
     var id_buf: [16]u8 = undefined;
     const id = try std.fmt.bufPrint(&id_buf, "{d}", .{pane_id});
-    try self.rex.request(.{ .new_split = pane_id }, "session.new_split", .{
-        .session_id = self.rex.session_id,
+    try self.rex_session.request(.{ .new_split = pane_id }, "session.new_split", .{
+        .session_id = self.rex_session.session_id,
         .anchor_id = @as([]const u8, &anchor),
         .direction = if (sp.side_by_side) "horizontal" else "vertical",
         .side = if (sp.before) "before" else "after",
@@ -429,13 +427,13 @@ fn onOptions(self: *Daemon, params: *msgpack.Decoder) !void {
 
 /// Hands `vim.ui.<func>` to Rex's palette, or gives back what it replaced.
 /// Without neorex's runtime on 'runtimepath' there's nothing to hand it to.
-fn setVimUi(nvim: *Nvim, func: []const u8, rex: bool) !void {
+fn setVimUi(nvim: *Nvim, func: []const u8, to_rex: bool) !void {
     _ = try nvim.execLua(
         \\local ok, ui = pcall(require, 'neorex.ui')
         \\if ok then ui.set(...) end
     , 2);
     try msgpack.writeStr(nvim.writer(), func);
-    try msgpack.writeBool(nvim.writer(), rex);
+    try msgpack.writeBool(nvim.writer(), to_rex);
 }
 
 /// Shows `lines`, one problem each, as a warning in Neovim.
@@ -460,14 +458,14 @@ fn onResize(self: *Daemon, rz: windows.Resize) !void {
     if (self.rex_layout.zoomed_block != null) return;
     // the editor spans the Rex window, so its size is the window's
     const window = self.nvim.editor_size;
-    for ([_]LayoutTree.Direction{ .horizontal, .vertical }, [_]i32{ rz.cols, rz.rows }, 0..) |dir, delta, axis| {
+    for ([_]rex.LayoutTree.Direction{ .horizontal, .vertical }, [_]i32{ rz.cols, rz.rows }, 0..) |dir, delta, axis| {
         const b = self.rex_layout.border(&block, dir) orelse continue;
         const n = self.rex_layout.node(b.split);
         const across = sizing.scaled(window[axis], n.rect[2 + axis]);
         const ratio = sizing.movedRatio(n.kind.split.ratio, delta, across, b.side == .before) orelse continue;
         self.rex_layout.setRatio(b.split, ratio);
-        try self.rex.request(.resize_pane, "session.resize_pane", .{
-            .session_id = self.rex.session_id,
+        try self.rex_session.request(.resize_pane, "session.resize_pane", .{
+            .session_id = self.rex_session.session_id,
             .direction = @tagName(dir),
             .before_block_id = @as([]const u8, &b.before_block),
             .after_block_id = @as([]const u8, &b.after_block),
@@ -494,14 +492,14 @@ fn onCurrent(self: *Daemon, win: i64) !void {
     const p = self.panes.byWin(win) orelse return;
     try self.nvim.fitUiTo(p);
     try self.draw();
-    try self.rex.focus(p.rex_block);
+    try self.rex_session.focus(p.rex_block);
 }
 
 /// A float became current: if it's in a floating pane, focus that.
 fn onCurrentFloat(self: *Daemon, win: i64) !void {
     self.nvim.current_float = win;
     const p = self.layerOfWin(win) orelse return;
-    try self.rex.focus(p.rex_block);
+    try self.rex_session.focus(p.rex_block);
 }
 
 /// A float took focus. Usually before it's drawn, so the next flush gives
@@ -534,7 +532,7 @@ fn reconcile(self: *Daemon) !void {
         // helper exits (as when neo-tree opens and closes quickly), showing
         // "exited". Before Rex answers there's no block yet, and
         // onSplitMade closes it.
-        if (p.rex_block) |*b| try self.rex.closeBlock(b);
+        if (p.rex_block) |*b| try self.rex_session.closeBlock(b);
         self.panes.remove(self.gpa, self.io, self.loop, i);
     }
     if (self.panes.list.items.len == 0) {
@@ -618,8 +616,8 @@ fn splitFrom(self: *const Daemon, sp: windows.Split) ?*Pane {
 // Rex
 
 fn onRex(self: *Daemon) !void {
-    if (!try self.rex.read()) return self.loop.remove(self.rex.client.fd());
-    while (try self.rex.next()) |update| switch (update) {
+    if (!try self.rex_session.read()) return self.loop.remove(self.rex_session.client.fd());
+    while (try self.rex_session.next()) |update| switch (update) {
         .split_made => |made| try self.onSplitMade(made.pane, made.block),
         // a floating pane that failed leaves its floats drawn in the pane
         .split_failed, .layer_failed => |failed| if (self.panes.byId(failed.pane)) |p| {
@@ -637,31 +635,31 @@ fn onRex(self: *Daemon) !void {
 /// Rex made the pane's split: link the block and let Rex size it.
 fn onSplitMade(self: *Daemon, pane_id: u32, block: []const u8) !void {
     // its window closed while Rex made it: nothing will draw there
-    const p = self.panes.byId(pane_id) orelse return self.rex.closeBlock(block);
+    const p = self.panes.byId(pane_id) orelse return self.rex_session.closeBlock(block);
     p.rex_block = Pane.rexBlock(block) catch blk: {
         std.debug.print("neorex daemon: not a block id: {s}\n", .{block});
         break :blk null;
     };
-    try self.rex.disown(block);
-    if (p.neovim_window_handle == self.nvim.current_win) try self.rex.focus(p.rex_block);
+    try self.rex_session.disown(block);
+    if (p.neovim_window_handle == self.nvim.current_win) try self.rex_session.focus(p.rex_block);
 }
 
 /// Rex made the floating pane's layer: link it, and focus it if its float is current.
 fn onLayerMade(self: *Daemon, pane_id: u32, block: []const u8, layer: ?[]const u8) !void {
     // its floats closed while Rex made it: nothing will draw there
     const p = self.panes.byId(pane_id) orelse {
-        if (layer) |id| return self.rex.closeLayer(id);
-        return self.rex.closeBlock(block);
+        if (layer) |id| return self.rex_session.closeLayer(id);
+        return self.rex_session.closeBlock(block);
     };
     p.rex_block = Pane.rexBlock(block) catch blk: {
         std.debug.print("neorex daemon: not a block id: {s}\n", .{block});
         break :blk null;
     };
-    try self.rex.disown(block);
+    try self.rex_session.disown(block);
     const l = &p.layer.?;
     if (layer) |id| l.id = Pane.rexLayer(id) catch null;
     l.bounds_asked -|= 1;
-    if (self.nvim.current_float != 0 and self.layerOfWin(self.nvim.current_float) == p) try self.rex.focus(p.rex_block);
+    if (self.nvim.current_float != 0 and self.layerOfWin(self.nvim.current_float) == p) try self.rex_session.focus(p.rex_block);
 }
 
 /// The user focused one of our panes in Rex: make its window current.
@@ -696,7 +694,7 @@ fn onLayout(self: *Daemon, wins: []const std.json.Value) !void {
 /// Remembers which Rex window holds our panes, and where each sits in it.
 fn readLayout(self: *Daemon, wins: []const std.json.Value) !void {
     for (wins) |w| {
-        var blocks = try layout.readWindow(self.gpa, w);
+        var blocks = try rex.layout.readWindow(self.gpa, w);
         defer blocks.deinit(self.gpa);
         for (blocks.floating.items) |f| self.onLayerBounds(f.block, f.rect);
         var ours = false;
@@ -706,15 +704,15 @@ fn readLayout(self: *Daemon, wins: []const std.json.Value) !void {
         };
         if (!ours) continue;
         try self.rex_layout.read(self.gpa, w);
-        const id = Client.getStr(w, "window_id") orelse continue;
-        if (id.len == 43) self.rex.window = id[0..43].*;
-        self.titles.readWindow(self.gpa, &self.panes, &self.rex, w);
+        const id = rex.Client.getStr(w, "window_id") orelse continue;
+        if (id.len == 43) self.rex_session.window = id[0..43].*;
+        self.titles.readWindow(self.gpa, &self.panes, &self.rex_session, w);
     }
 }
 
 /// A floating layer of ours somewhere else: the user moved it, so its
 /// floats follow, and from now on its size is theirs.
-fn onLayerBounds(self: *Daemon, block: []const u8, bounds: layout.Rect) void {
+fn onLayerBounds(self: *Daemon, block: []const u8, bounds: rex.layout.Rect) void {
     const p = self.panes.byBlock(block) orelse return;
     const l = if (p.layer) |*l| l else return;
     // a view from before Rex did what we asked
@@ -733,7 +731,7 @@ fn onLayerBounds(self: *Daemon, block: []const u8, bounds: layout.Rect) void {
 /// grant it (`onFloatsMoved`), and either way they fit what Rex gives.
 fn reconcileLayers(self: *Daemon) !void {
     var buf: [FloatGroups.max_groups]FloatGroups.Group = undefined;
-    const groups = if (self.rex.conn != .closed) FloatGroups.find(&self.grids, self.nvim.enteredFloats(), &buf) else buf[0..0];
+    const groups = if (self.rex_session.conn != .closed) FloatGroups.find(&self.grids, self.nvim.enteredFloats(), &buf) else buf[0..0];
     var i = self.panes.list.items.len;
     while (i > 0) {
         i -= 1;
@@ -743,7 +741,7 @@ fn reconcileLayers(self: *Daemon) !void {
             if (g.key == l.group.key) break g;
         } else {
             // without an id Rex hasn't answered yet: the answer closes it
-            if (l.id) |*id| try self.rex.closeLayer(id);
+            if (l.id) |*id| try self.rex_session.closeLayer(id);
             if (p.closing == null) p.closing = .window_closed;
             self.panes.remove(self.gpa, self.io, self.loop, i);
             continue;
@@ -773,7 +771,7 @@ fn onFloatsMoved(self: *Daemon, p: *Pane) !void {
     if (l.user_placed or l.id == null or p.rex_block == null) return self.refit(p);
     const bounds = self.layerBounds(l.group) orelse return self.refit(p);
     if (!self.sameBounds(bounds, l.bounds)) {
-        try self.rex.resizeLayer(p.id, &l.id.?, bounds);
+        try self.rex_session.resizeLayer(p.id, &l.id.?, bounds);
         l.bounds = bounds;
         l.bounds_asked += 1;
     }
@@ -786,7 +784,7 @@ fn onFloatsMoved(self: *Daemon, p: *Pane) !void {
 fn sizeLayer(self: *Daemon, p: *Pane, size: [2]u32) !void {
     const s = p.terminal_surface orelse return;
     if (s.view.cols == size[0] and s.view.rows == size[1]) return self.refit(p);
-    try self.rex.resizeTerminal(&p.rex_block.?, size[0], size[1]);
+    try self.rex_session.resizeTerminal(&p.rex_block.?, size[0], size[1]);
     p.awaiting_layout = true;
     try self.addTimer(.layout_timer, layout_wait_ms);
 }
@@ -840,21 +838,23 @@ fn newLayer(self: *Daemon, g: FloatGroups.Group) !void {
 
     var id_buf: [16]u8 = undefined;
     const id = try std.fmt.bufPrint(&id_buf, "{d}", .{pane_id});
-    try self.rex.newLayer(pane_id, bounds, .{ .block = .{
-        .flavor = "com.superlogical.terminal.shell",
-        .label = "neorex",
-        .options = .{
-            .shell = "none",
-            // a login session prints "Last login" before the pane draws
-            .login = false,
-            .command = &[_][]const u8{ self.exe, "pane", self.sock, id },
-            // the size it shows at: no Rex app sizes a floating pane's
-            // terminal (the block has no owner once we disown it), so
-            // without this it stays 80x24, and Rex shows only the top left
-            // of one bigger than the pane, as which-key's
-            .size = .{ .columns = size[0], .rows = size[1] },
+    try self.rex_session.newLayer(pane_id, bounds, .{
+        .block = .{
+            .flavor = "com.superlogical.terminal.shell",
+            .label = "neorex",
+            .options = .{
+                .shell = "none",
+                // a login session prints "Last login" before the pane draws
+                .login = false,
+                .command = &[_][]const u8{ self.exe, "pane", self.sock, id },
+                // the size it shows at: no Rex app sizes a floating pane's
+                // terminal (the block has no owner once we disown it), so
+                // without this it stays 80x24, and Rex shows only the top left
+                // of one bigger than the pane, as which-key's
+                .size = .{ .columns = size[0], .rows = size[1] },
+            },
         },
-    } });
+    });
 }
 
 /// Within half a cell of each other on grid 1.
