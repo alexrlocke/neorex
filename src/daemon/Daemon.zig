@@ -51,11 +51,13 @@ rex_layout: LayoutTree = .{},
 options: Options = .default,
 /// Set by `stop`; `run` returns it.
 stopped: ?StopReason = null,
+/// How long the cursor color timer was set for, while it runs.
+cursor_color_timer_ms: ?u32 = null,
 
 pub const StopReason = enum { nvim_exited, pane_gone, signal };
 
 /// What a loop event's token names; pane tokens fall in `_`.
-pub const Token = enum(usize) { signal, nvim_socket, helper_listener, rex_socket, focus_timer, layout_timer, _ };
+pub const Token = enum(usize) { signal, nvim_socket, helper_listener, rex_socket, focus_timer, layout_timer, cursor_color_timer, _ };
 pub const PaneEvent = struct { pane: *Pane, fd: Pane.PaneFd };
 
 comptime {
@@ -73,6 +75,13 @@ const focus_out_delay_ms = 80;
 
 /// How long a new split waits for the app to size it before trusting its terminal's size.
 const layout_wait_ms = 1000;
+/// How long to wait before asking a pane's terminal for its cursor color
+/// again, after an empty answer.
+const cursor_color_retry_ms = 500;
+/// While focus is elsewhere, how often to ask for the cursor color: quickly
+/// at first, to follow a theme picker's previews, then slower once it has
+/// stayed the same for a while, and not at all after a minute.
+const cursor_watch = .{ .fast_ms = 30, .slow_ms = 250, .ease_after_ms = 5000, .stop_after_ms = 60000 };
 
 /// About how many cells a Rex floating pane's frame takes, across and down.
 /// Only a first guess: once made, its floats fit whatever size it is.
@@ -147,6 +156,7 @@ fn handle(self: *Daemon, e: Loop.Event) !void {
         .rex_socket => try self.onRex(),
         .focus_timer => try self.sendFocus(true),
         .layout_timer => try self.layoutWaitOver(),
+        .cursor_color_timer => try self.onCursorColorTimer(),
         .helper_listener => {},
         _ => try self.onPane(e.token),
     }
@@ -269,15 +279,62 @@ fn onInput(self: *Daemon, pane: *Pane) !void {
     // a floating pane's default grid is set as it draws
     if (pane.layer == null) surface.forwarder.grid = self.gridOfPane(pane) orelse 0;
     _ = try surface.forwarder.feed(self.nvim.client, bytes);
+    if (surface.forwarder.ask_cursor_color) {
+        surface.forwarder.ask_cursor_color = false;
+        try askCursorColor(surface);
+    }
+    try self.scheduleCursorColor();
 }
 
-/// Typed into a pane Rex hasn't focused, as `rex send` can. Focus reports
-/// don't count: Rex sends them as it moves focus away.
+fn askCursorColor(surface: *Surface) !void {
+    try surface.terminal.writer.writeAll(input.cursor_query);
+    try surface.terminal.flush();
+}
+
+/// Starts the cursor color timer, or brings it forward, if a pane needs to
+/// ask again: after an empty answer, or while it watches for changes.
+fn scheduleCursorColor(self: *Daemon) !void {
+    var soonest: ?u32 = null;
+    for (self.panes.list.items) |p| if (p.terminal_surface) |s| {
+        const f = &s.forwarder;
+        if (f.retry_cursor_color) soonest = @min(soonest orelse cursor_color_retry_ms, cursor_color_retry_ms);
+        if (f.watch_cursor_color) {
+            const ms: u32 = if (f.cursor_quiet_ms < cursor_watch.ease_after_ms) cursor_watch.fast_ms else cursor_watch.slow_ms;
+            soonest = @min(soonest orelse ms, ms);
+        }
+    };
+    const ms = soonest orelse return;
+    if (self.cursor_color_timer_ms) |running| if (running <= ms) return;
+    self.cursor_color_timer_ms = ms;
+    try self.addTimer(.cursor_color_timer, ms);
+}
+
+/// Asks again in the panes that need to: those whose terminal answered with
+/// no cursor color before it had drawn them, and those watching for changes.
+fn onCursorColorTimer(self: *Daemon) !void {
+    const elapsed = self.cursor_color_timer_ms orelse 0;
+    self.cursor_color_timer_ms = null;
+    for (self.panes.list.items) |p| if (p.terminal_surface) |s| {
+        const f = &s.forwarder;
+        var ask = f.retry_cursor_color;
+        f.retry_cursor_color = false;
+        if (f.watch_cursor_color) {
+            f.cursor_quiet_ms +|= elapsed;
+            if (f.cursor_quiet_ms >= cursor_watch.stop_after_ms) f.watch_cursor_color = false else ask = true;
+        }
+        if (ask) try askCursorColor(s);
+    };
+    try self.scheduleCursorColor();
+}
+
+/// Typed into a pane Rex hasn't focused, as `rex send` can. The terminal's
+/// own reports don't count: Rex sends focus reports as it moves focus away,
+/// and a pane without focus keeps asking for the cursor color.
 fn typedIntoUnfocusedPane(self: *const Daemon, pane: *const Pane, bytes: []const u8) bool {
     const win = pane.neovim_window_handle orelse return false;
     return win != self.nvim.current_win and
         !self.rex.hasFocused(pane.rex_block) and
-        !input.onlyFocusReports(bytes);
+        !input.onlyReports(pane.terminal_surface.?.forwarder.parser, bytes);
 }
 
 fn newPane(self: *Daemon, win: i64) !void {

@@ -55,6 +55,10 @@ pub const theme_reports_on = "\x1b[?2031h";
 pub const theme_reports_off = "\x1b[?2031l";
 /// Asks for the theme now; the answer is a `dark_theme` event.
 pub const theme_query = "\x1b[?996n";
+/// Asks for the theme's cursor color with kitty's color protocol (OSC 21);
+/// the answer is a `cursor_color` event. Spec:
+/// https://sw.kovidgoyal.net/kitty/color-stack/#setting-and-querying-colors
+pub const cursor_query = "\x1b]21;cursor=?\x1b\\";
 
 /// Modifier keys held with a key or mouse event.
 pub const Mods = packed struct(u8) {
@@ -151,6 +155,9 @@ pub const Event = union(enum) {
     /// The terminal's theme is dark (`true`) or light (`false`): its answer
     /// to `theme_query`, and what it sends on a change once `theme_reports_on`.
     dark_theme: bool,
+    /// The theme's cursor color as 0xRRGGBB, the answer to `cursor_query`;
+    /// null when the terminal has none to report.
+    cursor_color: ?u24,
     mouse: Mouse,
     /// A sequence the parser doesn't know, as raw bytes. Valid until the next
     /// `next` or `feed`.
@@ -168,6 +175,7 @@ pub const Event = union(enum) {
             .paste_end => try w.writeAll("paste end"),
             .focus => |in| try w.writeAll(if (in) "focus in" else "focus out"),
             .dark_theme => |dark| try w.writeAll(if (dark) "theme dark" else "theme light"),
+            .cursor_color => |color| if (color) |c| try w.print("cursor color #{x:0>6}", .{c}) else try w.writeAll("cursor color none"),
             .mouse => |m| {
                 try w.print("mouse {s} {s} row={d} col={d}", .{ @tagName(m.button), @tagName(m.action), m.row, m.col });
                 if (!m.mods.isEmpty()) try writeMods(m.mods, w);
@@ -177,21 +185,35 @@ pub const Event = union(enum) {
     }
 };
 
-/// True if `bytes` hold nothing but focus reports (`CSI I`, `CSI O`).
-pub fn onlyFocusReports(bytes: []const u8) bool {
-    var rest = bytes;
-    while (rest.len > 0) {
-        if (!std.mem.startsWith(u8, rest, "\x1b[I") and !std.mem.startsWith(u8, rest, "\x1b[O")) return false;
-        rest = rest[3..];
-    }
+/// True if `bytes` hold nothing the user typed: only the terminal's own
+/// reports, such as focus changes, theme reports and replies to our color
+/// queries. `parser` is the parser `bytes` will be fed to, so a report split
+/// across reads is still seen whole; it is copied, not changed.
+pub fn onlyReports(parser: Parser, bytes: []const u8) bool {
+    var p = parser;
+    p.feed(bytes);
+    while (p.next()) |event| switch (event) {
+        .focus, .dark_theme, .cursor_color => {},
+        // a reply to a query we don't parse, such as another OSC
+        .unknown => |seq| if (!std.mem.startsWith(u8, seq, "\x1b]")) return false,
+        .key, .paste_start, .paste, .paste_end, .mouse => return false,
+    };
     return true;
 }
 
-test "focus reports alone" {
-    try std.testing.expect(onlyFocusReports("\x1b[O"));
-    try std.testing.expect(onlyFocusReports("\x1b[I\x1b[O"));
-    try std.testing.expect(!onlyFocusReports("\x1b[Ia"));
-    try std.testing.expect(!onlyFocusReports("\x1b[A"));
+test "reports alone" {
+    try std.testing.expect(onlyReports(.{}, "\x1b[O"));
+    try std.testing.expect(onlyReports(.{}, "\x1b[I\x1b[O"));
+    try std.testing.expect(onlyReports(.{}, "\x1b]21;cursor=rgb:3b/d3/c3\x1b\\"));
+    try std.testing.expect(onlyReports(.{}, "\x1b[?997;1n\x1b]21;cursor=\x1b\\"));
+    try std.testing.expect(!onlyReports(.{}, "\x1b[Ia"));
+    try std.testing.expect(!onlyReports(.{}, "\x1b[A"));
+
+    // the rest of a reply that started in an earlier read
+    var parser: Parser = .{};
+    parser.feed("\x1b]21;cursor=rgb:3b");
+    while (parser.next()) |_| {}
+    try std.testing.expect(onlyReports(parser, "/d3/c3\x1b\\"));
 }
 
 /// Writes a key in Neovim's key notation, the form `nvim_input` takes:
@@ -682,6 +704,7 @@ pub const Parser = struct {
         self.state = .ground;
         const sequence = self.sequence[0..self.sequence_len];
         if (self.in_paste) return .{ .paste = sequence };
+        if (cursorColorReply(sequence)) |color| return .{ .cursor_color = color };
         return .{ .unknown = sequence };
     }
 
@@ -756,6 +779,52 @@ pub const Parser = struct {
 const testing = std.testing;
 
 /// Feed each of `feeds` in turn (as separate reads) and check the events.
+/// The color in an OSC 21 reply that reports the cursor, as in
+/// `ESC ] 21 ; cursor=rgb:3b/d3/c3 ESC \`: the outer null when `osc` isn't
+/// such a reply, the inner one when the cursor has no color.
+fn cursorColorReply(osc: []const u8) ??u24 {
+    const prefix = "\x1b]21;";
+    if (!std.mem.startsWith(u8, osc, prefix)) return null;
+    var body = osc[prefix.len..];
+    if (std.mem.endsWith(u8, body, "\x1b\\")) body = body[0 .. body.len - 2] else if (std.mem.endsWith(u8, body, "\x07")) body = body[0 .. body.len - 1] else return null;
+    var fields = std.mem.splitScalar(u8, body, ';');
+    while (fields.next()) |field| {
+        const value = if (std.mem.startsWith(u8, field, "cursor=")) field["cursor=".len..] else continue;
+        return parseColor(value);
+    }
+    return null;
+}
+
+/// `rgb:R/G/B`, with 1 to 4 hex digits a channel, or `#RRGGBB`; null for
+/// anything else, such as the empty value of a color that isn't set.
+fn parseColor(value: []const u8) ?u24 {
+    if (value.len == 7 and value[0] == '#') return std.fmt.parseInt(u24, value[1..], 16) catch null;
+    if (!std.mem.startsWith(u8, value, "rgb:")) return null;
+    var channels = std.mem.splitScalar(u8, value["rgb:".len..], '/');
+    var color: u24 = 0;
+    for (0..3) |_| {
+        const hex = channels.next() orelse return null;
+        if (hex.len == 0 or hex.len > 4) return null;
+        const n = std.fmt.parseInt(u16, hex, 16) catch return null;
+        // scale to 8 bits: the most significant digits count
+        const max: u32 = (@as(u32, 1) << @intCast(hex.len * 4)) - 1;
+        color = color << 8 | @as(u24, @intCast((@as(u32, n) * 255 + max / 2) / max));
+    }
+    if (channels.next() != null) return null;
+    return color;
+}
+
+test "colors in replies" {
+    try testing.expectEqual(@as(?u24, 0x3bd3c3), parseColor("rgb:3b/d3/c3"));
+    try testing.expectEqual(@as(?u24, 0x3bd3c3), parseColor("rgb:3b3b/d3d3/c3c3"));
+    try testing.expectEqual(@as(?u24, 0xff00ff), parseColor("rgb:f/0/f"));
+    try testing.expectEqual(@as(?u24, 0x3bd3c3), parseColor("#3bd3c3"));
+    try testing.expectEqual(@as(?u24, null), parseColor(""));
+    try testing.expectEqual(@as(?u24, null), parseColor("rgb:3b/d3"));
+    try testing.expectEqual(@as(?u24, null), parseColor("rgb:3b/d3/c3/00"));
+    try testing.expectEqual(@as(?u24, null), parseColor("rgb:zz/d3/c3"));
+}
+
 fn expectEvents(feeds: []const []const u8, want: []const Event) !void {
     var parser: Parser = .{};
     var i: usize = 0;
@@ -859,6 +928,16 @@ test "sequences split across reads" {
 test "theme reports" {
     try expectEvents(&.{ "\x1b[?997;1n", "\x1b[?997;2n" }, &.{ .{ .dark_theme = true }, .{ .dark_theme = false } });
     try expectEvents(&.{"\x1b[?997;3n"}, &.{.{ .unknown = "\x1b[?997;3n" }});
+}
+
+test "cursor color replies" {
+    try expectEvents(&.{"\x1b]21;cursor=rgb:3b/d3/c3\x1b\\"}, &.{.{ .cursor_color = 0x3bd3c3 }});
+    try expectEvents(&.{ "\x1b]21;cursor=rgb:3b", "/d3/c3\x07" }, &.{.{ .cursor_color = 0x3bd3c3 }});
+    // asked before the terminal knows its theme: no color yet
+    try expectEvents(&.{"\x1b]21;cursor=\x1b\\"}, &.{.{ .cursor_color = null }});
+    try expectEvents(&.{"\x1b]21;foreground=;cursor=#3bd3c3;4=rgb:81/a2/be\x1b\\"}, &.{.{ .cursor_color = 0x3bd3c3 }});
+    // a reply without the cursor isn't one of ours
+    try expectEvents(&.{"\x1b]21;4=rgb:81/a2/be\x1b\\"}, &.{.{ .unknown = "\x1b]21;4=rgb:81/a2/be\x1b\\" }});
 }
 
 test "unknown and broken input" {

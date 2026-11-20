@@ -109,9 +109,16 @@ neorex keeps Neovim in step with Rex's theme:
   color) is drawn as that palette color, so Rex fills it in from its current
   theme and it changes when the theme does. Highlights with RGB colors are
   drawn as before.
+- **Accent.** neorex asks Rex for the theme's cursor color (OSC 21) and sets
+  `vim.g.neorex_accent` to it, as `"#rrggbb"`, or to nil when the theme has
+  none. It asks again after each theme change and, while the pane doesn't
+  have focus, as when Rex's theme picker is open, every few hundredths of a
+  second, so the accent follows the picker's previews.
 
 `runtime/` has a colorscheme and a lualine theme, both named `neorex`, made
-only of the 16 palette colors, so Neovim takes on Rex's colors exactly.
+of the 16 palette colors and the accent, so Neovim takes on Rex's colors
+exactly. The accent colors the Normal-mode statusline, and blue stands in for
+it when there is none.
 neorex installs them beside its binary, in `share/neorex/runtime`, and adds
 them to Neovim's `'runtimepath'` itself, so inside neorex `:colorscheme neorex`
 works with no setup. Before your `init.lua` runs, neorex also sets
@@ -155,6 +162,19 @@ With mini.statusline instead of lualine, the colorscheme alone is enough: it
 gives mini.statusline the same colors as the lualine theme.
 
 Plugins that set their own RGB colors keep them.
+
+To use the accent elsewhere, link to the `NeorexAccent` highlight group,
+which the `neorex` colorscheme keeps up to date, or read
+`vim.g.neorex_accent` when the `User NeorexAccent` event fires:
+
+```lua
+vim.api.nvim_create_autocmd("User", {
+  pattern = "NeorexAccent",
+  callback = function()
+    vim.api.nvim_set_hl(0, "CursorLineNr", { fg = vim.g.neorex_accent, bold = true })
+  end,
+})
+```
 
 ## Pickers in Rex's command palette
 
@@ -256,6 +276,9 @@ loading neorex's actions, shows a message and asks nothing.
   "Press ENTER".
 - No global statusline: neorex sets `laststatus=3` to `2`, so each pane shows
   its own window's statusline. Neovim draws none on neorex's windows with `3`.
+- The accent is an RGB color, so it changes only once neorex has asked for it
+  again, not with the palette. When Rex's app runs on another machine than
+  neorex, it lags the rest of the theme by about one network round trip.
 
 ## Plans
 

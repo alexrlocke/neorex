@@ -26,6 +26,25 @@ grab: ?Target = null,
 send_focus: bool = true,
 /// The last focus report seen.
 focused: ?bool = null,
+/// Set when the terminal should be asked for its cursor color again: after
+/// a theme report, and on focus. The caller writes `input.cursor_query` to
+/// the terminal and clears it.
+ask_cursor_color: bool = false,
+/// The last cursor color this terminal reported, given to Neovim as the
+/// accent. Until there is one, an empty reply means the terminal doesn't
+/// know its theme yet, not that the theme has none.
+cursor_color: ?u24 = null,
+/// Set on an empty reply before the first color: the caller asks again a
+/// little later, while `cursor_retries` lasts, and clears it. Rex answers
+/// empty until it has drawn the pane.
+retry_cursor_color: bool = false,
+cursor_retries: u8 = 10,
+/// While focus is elsewhere, the caller keeps asking for the cursor color, so
+/// the accent follows changes nobody reports, such as a theme picker's
+/// previews. `quiet_ms` is how long the color has stayed the same; the
+/// caller asks less often as it grows, and stops after a while.
+watch_cursor_color: bool = false,
+cursor_quiet_ms: u32 = 0,
 
 /// A float's grid and where it's drawn, in terminal cells.
 pub const Target = struct { grid: u32, row: i32, col: i32, width: u32, height: u32 };
@@ -78,6 +97,9 @@ pub fn feed(self: *Forwarder, nvim: *Nvim, bytes: []const u8) !bool {
         .paste_end => if (self.paste_phase == 2) try paste(nvim, "", 3),
         .focus => |focused| {
             self.focused = focused;
+            self.watch_cursor_color = !focused;
+            self.cursor_quiet_ms = 0;
+            if (focused) self.ask_cursor_color = true;
             if (self.send_focus) {
                 _ = try nvim.request("nvim_ui_set_focus", 1);
                 try msgpack.writeBool(nvim.writer(), focused);
@@ -92,7 +114,20 @@ pub fn feed(self: *Forwarder, nvim: *Nvim, bytes: []const u8) !bool {
             args.col = to.col;
             try args.send(nvim, to.grid);
         },
-        .dark_theme => |dark| try setBackground(nvim, dark),
+        .dark_theme => |dark| {
+            try setBackground(nvim, dark);
+            self.ask_cursor_color = true;
+        },
+        .cursor_color => |color| if (color == null and self.cursor_color == null) {
+            if (self.cursor_retries > 0) {
+                self.cursor_retries -= 1;
+                self.retry_cursor_color = true;
+            }
+        } else if (!std.meta.eql(color, self.cursor_color)) {
+            self.cursor_color = color;
+            self.cursor_quiet_ms = 0;
+            try setAccent(nvim, color);
+        },
         .unknown => {},
     };
     try sendKeys(nvim, &keys);
@@ -108,6 +143,22 @@ fn setBackground(nvim: *Nvim, dark: bool) !void {
         \\if vim.g.neorex_follow_theme ~= false then vim.o.background = ... end
     , 1);
     try msgpack.writeStr(nvim.writer(), if (dark) "dark" else "light");
+}
+
+/// Sets `g:neorex_accent` to the theme's cursor color, `#rrggbb`, or clears
+/// it. When it changes, recolors the `neorex` colorscheme's accent groups if
+/// it's in use, and fires `User NeorexAccent` for other configs to follow.
+fn setAccent(nvim: *Nvim, color: ?u24) !void {
+    _ = try nvim.execLua(
+        \\local color = ...
+        \\if vim.g.neorex_accent == color then return end
+        \\vim.g.neorex_accent = color
+        \\if vim.g.colors_name == "neorex" then require("neorex.accent").apply() end
+        \\vim.api.nvim_exec_autocmds("User", { pattern = "NeorexAccent", modeline = false })
+    , 1);
+    const c = color orelse return msgpack.writeNil(nvim.writer());
+    var buf: [7]u8 = undefined;
+    try msgpack.writeStr(nvim.writer(), std.fmt.bufPrint(&buf, "#{x:0>6}", .{c}) catch unreachable);
 }
 
 /// Sends buffered keys with `nvim_input`, then empties the buffer.
