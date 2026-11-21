@@ -90,6 +90,20 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_msgpack.step);
     b.step("test-msgpack", "Run msgpack tests").dependOn(&run_msgpack.step);
 
+    // integration tests: neorex's pieces against a real Neovim; each skips
+    // when nvim isn't installed
+    const integration_mod = b.createModule(.{
+        .root_source_file = b.path("src/integration.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    integration_mod.addImport("msgpack", msgpack_mod);
+    const integration_tests = b.addTest(.{ .root_module = integration_mod });
+    const run_integration = b.addRunArtifact(integration_tests);
+    test_step.dependOn(&run_integration.step);
+    b.step("test-integration", "Run the tests that drive a real Neovim").dependOn(&run_integration.step);
+
     // golden tests: renderer output through Ghostty's terminal emulator
     const golden = b.option(bool, "golden", "Run the golden tests too (downloads Ghostty)") orelse false;
     if (!golden) return;
