@@ -1,8 +1,9 @@
 //! Names each pane, and our Rex window's tab, after the file its window
 //! shows. A pane gets it as its block's label and as its terminal's title:
 //! a pane run from a shell shows the running program's title in its header,
-//! not the label. The tab takes the current window's file, unless the user
-//! named it. What outlives us is put back when we exit.
+//! not the label. The tab takes the current window's file while one of our
+//! panes has focus, unless the user named it. What outlives us is put back
+//! when we exit.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -98,10 +99,10 @@ fn readLaunchLabel(self: *Titles, gpa: Allocator, panes: *const Panes, layer: st
 }
 
 /// Names every pane after its window's file, and the tab after the
-/// current window's, where they changed.
-pub fn sync(self: *Titles, gpa: Allocator, panes: *Panes, rex: *RexSession, current_win: i64) !void {
+/// current window's while `focused`, where they changed.
+pub fn sync(self: *Titles, gpa: Allocator, panes: *Panes, rex: *RexSession, current_win: i64, focused: bool) !void {
     for (panes.list.items) |*p| try self.syncPane(gpa, p, rex);
-    try self.syncWindow(gpa, rex, current_win);
+    try self.syncWindow(gpa, rex, current_win, focused);
 }
 
 fn syncPane(self: *Titles, gpa: Allocator, p: *Pane, rex: *RexSession) !void {
@@ -129,9 +130,16 @@ fn syncPane(self: *Titles, gpa: Allocator, p: *Pane, rex: *RexSession) !void {
     };
 }
 
-fn syncWindow(self: *Titles, gpa: Allocator, rex: *RexSession, current_win: i64) !void {
+fn syncWindow(self: *Titles, gpa: Allocator, rex: *RexSession, current_win: i64, focused: bool) !void {
     // not before a view has shown its label, so a user's name is never replaced
     if (self.window_named or self.window == null or rex.conn == .closed) return;
+    if (!focused) {
+        // another pane in the tab has focus: Rex's default names the tab after it
+        const l = self.window_label orelse return;
+        gpa.free(l);
+        self.window_label = null;
+        return rex.setWindowLabel("");
+    }
     const name = self.names.get(current_win) orelse return;
     if (self.window_label) |l| if (std.mem.eql(u8, l, name)) return;
     const label = try gpa.dupe(u8, name);

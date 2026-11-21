@@ -157,7 +157,7 @@ fn handle(self: *Daemon, e: Loop.Event) !void {
 /// moment, in case another pane gains it.
 fn afterBatch(self: *Daemon) !void {
     try self.sendFocus(false);
-    try self.titles.sync(self.gpa, &self.panes, &self.rex, self.nvim.current_win);
+    try self.titles.sync(self.gpa, &self.panes, &self.rex, self.nvim.current_win, self.nvim.ui_focused);
 }
 
 fn sendFocus(self: *Daemon, waited: bool) !void {
