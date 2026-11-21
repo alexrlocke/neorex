@@ -4,7 +4,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const msgpack = @import("../nvim/msgpack.zig");
-const rpc = @import("../nvim/rpc.zig");
 
 const Style = @This();
 
@@ -180,15 +179,15 @@ pub fn apply(self: *Style, gpa: Allocator, event: Event, d: *msgpack.Decoder, le
         },
         .mode_info_set => {
             if (len < 2) return error.BadMessage;
-            self.cursor_style_enabled = try rpc.expectBool(d);
-            const n = try rpc.expectArray(d);
+            self.cursor_style_enabled = try msgpack.expectBool(d);
+            const n = try msgpack.expectArray(d);
             self.cursor_modes.clearRetainingCapacity();
             for (0..n) |_| try self.cursor_modes.append(gpa, try readCursorMode(d));
             return 2;
         },
         .mode_change => {
             if (len < 2) return error.BadMessage;
-            try rpc.skip(d); // mode name
+            try msgpack.skip(d); // mode name
             self.mode_idx = try expectInt(d, u32);
             return 2;
         },
@@ -204,17 +203,17 @@ fn readCursorMode(d: *msgpack.Decoder) !CursorMode {
     var m: CursorMode = .{};
     var blinkon: i64 = 0;
     var blinkoff: i64 = 0;
-    const n = try rpc.expectMap(d);
+    const n = try msgpack.expectMap(d);
     for (0..n) |_| {
-        const key = try rpc.expectStr(d);
+        const key = try msgpack.expectStr(d);
         if (std.mem.eql(u8, key, "cursor_shape")) {
-            m.shape = std.meta.stringToEnum(CursorMode.Shape, try rpc.expectStr(d)) orelse .block;
+            m.shape = std.meta.stringToEnum(CursorMode.Shape, try msgpack.expectStr(d)) orelse .block;
         } else if (std.mem.eql(u8, key, "blinkon")) {
-            blinkon = try rpc.expectInt(d);
+            blinkon = try msgpack.expectInt(d);
         } else if (std.mem.eql(u8, key, "blinkoff")) {
-            blinkoff = try rpc.expectInt(d);
+            blinkoff = try msgpack.expectInt(d);
         } else {
-            try rpc.skip(d);
+            try msgpack.skip(d);
         }
     }
     // as Neovim's TUI decides
@@ -225,42 +224,42 @@ fn readCursorMode(d: *msgpack.Decoder) !CursorMode {
 /// An `rgb_attr` map. Unknown keys are skipped.
 fn readAttr(self: *Style, gpa: Allocator, d: *msgpack.Decoder) !Attr {
     var a: Attr = .{};
-    const n = try rpc.expectMap(d);
+    const n = try msgpack.expectMap(d);
     for (0..n) |_| {
-        const key = std.meta.stringToEnum(AttrKey, try rpc.expectStr(d)) orelse {
-            try rpc.skip(d);
+        const key = std.meta.stringToEnum(AttrKey, try msgpack.expectStr(d)) orelse {
+            try msgpack.skip(d);
             continue;
         };
         switch (key) {
             .foreground => a.fg = try expectColor(d),
             .background => a.bg = try expectColor(d),
             .special => a.sp = try expectColor(d),
-            .blend => a.blend = std.math.cast(u8, try rpc.expectInt(d)) orelse return error.BadMessage,
-            .bold => a.bold = try rpc.expectBool(d),
-            .italic => a.italic = try rpc.expectBool(d),
-            .reverse => a.reverse = try rpc.expectBool(d),
-            .strikethrough => a.strikethrough = try rpc.expectBool(d),
-            .dim => a.dim = try rpc.expectBool(d),
-            .blink => a.blink = try rpc.expectBool(d),
-            .conceal => a.conceal = try rpc.expectBool(d),
-            .overline => a.overline = try rpc.expectBool(d),
-            .altfont => a.altfont = try rpc.expectBool(d),
-            .underline => if (try rpc.expectBool(d)) {
+            .blend => a.blend = std.math.cast(u8, try msgpack.expectInt(d)) orelse return error.BadMessage,
+            .bold => a.bold = try msgpack.expectBool(d),
+            .italic => a.italic = try msgpack.expectBool(d),
+            .reverse => a.reverse = try msgpack.expectBool(d),
+            .strikethrough => a.strikethrough = try msgpack.expectBool(d),
+            .dim => a.dim = try msgpack.expectBool(d),
+            .blink => a.blink = try msgpack.expectBool(d),
+            .conceal => a.conceal = try msgpack.expectBool(d),
+            .overline => a.overline = try msgpack.expectBool(d),
+            .altfont => a.altfont = try msgpack.expectBool(d),
+            .underline => if (try msgpack.expectBool(d)) {
                 a.underline = .single;
             },
-            .undercurl => if (try rpc.expectBool(d)) {
+            .undercurl => if (try msgpack.expectBool(d)) {
                 a.underline = .curl;
             },
-            .underdouble => if (try rpc.expectBool(d)) {
+            .underdouble => if (try msgpack.expectBool(d)) {
                 a.underline = .double;
             },
-            .underdotted => if (try rpc.expectBool(d)) {
+            .underdotted => if (try msgpack.expectBool(d)) {
                 a.underline = .dotted;
             },
-            .underdashed => if (try rpc.expectBool(d)) {
+            .underdashed => if (try msgpack.expectBool(d)) {
                 a.underline = .dashed;
             },
-            .url => a.url = try self.intern(gpa, try rpc.expectStr(d)),
+            .url => a.url = try self.intern(gpa, try msgpack.expectStr(d)),
         }
     }
     return a;
@@ -282,18 +281,18 @@ fn intern(self: *Style, gpa: Allocator, target: []const u8) !?u32 {
 /// The palette colors from a `cterm_attr` map, into `a`. Its other keys
 /// repeat the RGB ones and are skipped.
 fn readCtermColors(d: *msgpack.Decoder, a: *Attr) !void {
-    const n = try rpc.expectMap(d);
+    const n = try msgpack.expectMap(d);
     for (0..n) |_| {
-        const key = try rpc.expectStr(d);
+        const key = try msgpack.expectStr(d);
         const idx = if (std.mem.eql(u8, key, "foreground"))
             &a.fg_idx
         else if (std.mem.eql(u8, key, "background"))
             &a.bg_idx
         else {
-            try rpc.skip(d);
+            try msgpack.skip(d);
             continue;
         };
-        idx.* = std.math.cast(u8, try rpc.expectInt(d));
+        idx.* = std.math.cast(u8, try msgpack.expectInt(d));
     }
 }
 
@@ -320,12 +319,12 @@ const AttrKey = enum {
 };
 
 fn expectInt(d: *msgpack.Decoder, comptime T: type) !T {
-    return std.math.cast(T, try rpc.expectInt(d)) orelse error.BadMessage;
+    return std.math.cast(T, try msgpack.expectInt(d)) orelse error.BadMessage;
 }
 
 /// An RGB color, or null for -1 (unset).
 fn expectColor(d: *msgpack.Decoder) !?u24 {
-    const n = try rpc.expectInt(d);
+    const n = try msgpack.expectInt(d);
     if (n == -1) return null;
     return std.math.cast(u24, n) orelse error.BadMessage;
 }

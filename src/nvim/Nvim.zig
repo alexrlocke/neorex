@@ -201,7 +201,7 @@ test "eval" {
 
     var r = try waitResponse(&nvim, gpa, id);
     try std.testing.expectEqual(@as(?[]const u8, null), r.err);
-    try std.testing.expectEqual(@as(i64, 3), try rpc.expectInt(&r.result));
+    try std.testing.expectEqual(@as(i64, 3), try msgpack.expectInt(&r.result));
 }
 
 test "error response" {
@@ -256,7 +256,7 @@ test "connect to a listening neovim" {
     try msgpack.writeStr(nvim.writer(), "1+2");
     try nvim.flush();
     var r = try waitResponse(&nvim, gpa, id);
-    try std.testing.expectEqual(@as(i64, 3), try rpc.expectInt(&r.result));
+    try std.testing.expectEqual(@as(i64, 3), try msgpack.expectInt(&r.result));
 }
 
 /// `connect`, retrying for up to 2 s: Neovim makes its socket a moment after starting.
@@ -282,7 +282,7 @@ test "large reply over several reads" {
 
     // [channel id, {version, functions, ...}]
     var r = try waitResponse(&nvim, gpa, id);
-    try std.testing.expectEqual(@as(u32, 2), try rpc.expectArray(&r.result));
-    try std.testing.expect(try rpc.expectInt(&r.result) > 0);
-    try rpc.skip(&r.result);
+    try std.testing.expectEqual(@as(u32, 2), try msgpack.expectArray(&r.result));
+    try std.testing.expect(try msgpack.expectInt(&r.result) > 0);
+    try msgpack.skip(&r.result);
 }

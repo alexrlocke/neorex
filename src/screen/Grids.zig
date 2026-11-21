@@ -6,7 +6,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const msgpack = @import("../nvim/msgpack.zig");
-const rpc = @import("../nvim/rpc.zig");
 const Grid = @import("Grid.zig");
 const Style = @import("Style.zig");
 
@@ -175,20 +174,20 @@ pub fn msgRows(self: *const Grids) u32 {
 pub fn applyRedraw(self: *Grids, gpa: Allocator, params: *msgpack.Decoder) !bool {
     var flushed = false;
     // [[name, args, args, ...], ...]
-    const events = try rpc.expectArray(params);
+    const events = try msgpack.expectArray(params);
     for (0..events) |_| {
-        const len = try rpc.expectArray(params);
+        const len = try msgpack.expectArray(params);
         if (len == 0) return error.BadMessage;
-        const name = try rpc.expectStr(params);
+        const name = try msgpack.expectStr(params);
         const event = std.meta.stringToEnum(Event, name);
         for (1..len) |_| {
             const e = event orelse {
-                try rpc.skip(params);
+                try msgpack.skip(params);
                 continue;
             };
-            const n = try rpc.expectArray(params);
+            const n = try msgpack.expectArray(params);
             const used = try self.apply(gpa, e, params, n);
-            for (used..n) |_| try rpc.skip(params);
+            for (used..n) |_| try msgpack.skip(params);
             if (e == .flush) flushed = true;
         }
     }
@@ -241,7 +240,7 @@ fn apply(self: *Grids, gpa: Allocator, event: Event, d: *msgpack.Decoder, len: u
             const g = self.get(try expectInt(d, u32));
             const r = try expectInt(d, u32);
             const col = try expectInt(d, u32);
-            if (g) |grid| try grid.line(d, r, col) else try rpc.skip(d);
+            if (g) |grid| try grid.line(d, r, col) else try msgpack.skip(d);
             return 4;
         },
         .grid_scroll => {
@@ -281,7 +280,7 @@ fn apply(self: *Grids, gpa: Allocator, event: Event, d: *msgpack.Decoder, len: u
         .win_pos, .win_external_pos, .win_float_pos => {
             if (len < 2) return error.BadMessage;
             const id = try expectInt(d, u32);
-            const win = try rpc.expectHandle(d);
+            const win = try msgpack.expectHandle(d);
             const kind: Win.Kind = switch (event) {
                 .win_pos => .ordinary,
                 .win_external_pos => .external,
@@ -293,11 +292,11 @@ fn apply(self: *Grids, gpa: Allocator, event: Event, d: *msgpack.Decoder, len: u
             }
             if (len < 8) return error.BadMessage;
             var f: Float = .{};
-            f.anchor = std.meta.stringToEnum(Float.Anchor, &lower2(try rpc.expectStr(d))) orelse .nw;
+            f.anchor = std.meta.stringToEnum(Float.Anchor, &lower2(try msgpack.expectStr(d))) orelse .nw;
             f.anchor_grid = try expectInt(d, u32);
             f.row = try expectNumber(d);
             f.col = try expectNumber(d);
-            f.focusable = try rpc.expectBool(d);
+            f.focusable = try msgpack.expectBool(d);
             f.zindex = try expectInt(d, u32);
             if (len < 11) {
                 try self.wins.put(gpa, id, .{ .win = win, .kind = kind, .float = f });
@@ -349,7 +348,7 @@ fn expectNumber(d: *msgpack.Decoder) !f64 {
 }
 
 fn expectInt(d: *msgpack.Decoder, comptime T: type) !T {
-    return std.math.cast(T, try rpc.expectInt(d)) orelse error.BadMessage;
+    return std.math.cast(T, try msgpack.expectInt(d)) orelse error.BadMessage;
 }
 
 const testing = std.testing;

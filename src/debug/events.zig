@@ -106,11 +106,11 @@ fn printMessage(nvim: *Nvim, out: *Writer, msg: rpc.Message) !void {
             }
             // params: [[name, args, args, ...], ...]
             var d = note.params;
-            const events = try rpc.expectArray(&d);
+            const events = try msgpack.expectArray(&d);
             for (0..events) |_| {
-                const len = try rpc.expectArray(&d);
+                const len = try msgpack.expectArray(&d);
                 if (len == 0) return error.BadMessage;
-                const name = try rpc.expectStr(&d);
+                const name = try msgpack.expectStr(&d);
                 for (1..len) |_| {
                     try out.print("{s} ", .{name});
                     try printValue(&d, out);
@@ -149,13 +149,13 @@ fn printValue(d: *msgpack.Decoder, out: *Writer) !void {
         },
         .str => |len| {
             try out.writeByte('"');
-            try writeEscaped(out, try rpc.expectBytes(d, len));
+            try writeEscaped(out, try msgpack.expectBytes(d, len));
             try out.writeByte('"');
         },
-        .bin => |len| try out.print("bin({d})", .{(try rpc.expectBytes(d, len)).len}),
+        .bin => |len| try out.print("bin({d})", .{(try msgpack.expectBytes(d, len)).len}),
         // buffer, window and tabpage handles: an int packed inside
         .ext => |e| {
-            const payload = try rpc.expectBytes(d, e.len);
+            const payload = try msgpack.expectBytes(d, e.len);
             var inner: msgpack.Decoder = .{};
             inner.feed(payload);
             const names = [_][]const u8{ "buf", "win", "tab" };

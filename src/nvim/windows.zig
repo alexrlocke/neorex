@@ -154,42 +154,42 @@ pub fn parseNote(method: []const u8, params: *msgpack.Decoder) !?Note {
         .title, .fixed => 2,
         else => 1,
     };
-    if (try rpc.expectArray(params) < want) return error.BadMessage;
+    if (try msgpack.expectArray(params) < want) return error.BadMessage;
     // the one note that isn't about a window
-    if (tag == .cmdheight) return .{ .cmdheight = std.math.cast(u32, try rpc.expectInt(params)) orelse return error.BadMessage };
-    const win = try rpc.expectHandle(params);
+    if (tag == .cmdheight) return .{ .cmdheight = std.math.cast(u32, try msgpack.expectInt(params)) orelse return error.BadMessage };
+    const win = try msgpack.expectHandle(params);
     return switch (tag) {
         .current => .{ .current = win },
         .reopen => .{ .reopen = win },
         .float => .{ .float = win },
         .entered => .{ .entered = win },
-        .title => .{ .title = .{ .win = win, .name = try rpc.expectStr(params) } },
-        .fixed => .{ .fixed = .{ .win = win, .cells = std.math.cast(u32, try rpc.expectInt(params)) orelse return error.BadMessage } },
+        .title => .{ .title = .{ .win = win, .name = try msgpack.expectStr(params) } },
+        .fixed => .{ .fixed = .{ .win = win, .cells = std.math.cast(u32, try msgpack.expectInt(params)) orelse return error.BadMessage } },
         .resize => .{ .resize = .{
             .win = win,
-            .cols = std.math.cast(i32, try rpc.expectInt(params)) orelse return error.BadMessage,
-            .rows = std.math.cast(i32, try rpc.expectInt(params)) orelse return error.BadMessage,
+            .cols = std.math.cast(i32, try msgpack.expectInt(params)) orelse return error.BadMessage,
+            .rows = std.math.cast(i32, try msgpack.expectInt(params)) orelse return error.BadMessage,
         } },
         .cmdheight => unreachable,
         .split => .{ .split = .{
             .win = win,
-            .side_by_side = try rpc.expectBool(params),
-            .before = try rpc.expectBool(params),
-            .from = try rpc.expectHandle(params),
+            .side_by_side = try msgpack.expectBool(params),
+            .before = try msgpack.expectBool(params),
+            .from = try msgpack.expectHandle(params),
         } },
     };
 }
 
 /// `[first, anchor]` from `setup`'s response.
 pub fn parseSetup(result: *msgpack.Decoder) ![2]i64 {
-    if (try rpc.expectArray(result) < 2) return error.BadMessage;
-    return .{ try rpc.expectHandle(result), try rpc.expectHandle(result) };
+    if (try msgpack.expectArray(result) < 2) return error.BadMessage;
+    return .{ try msgpack.expectHandle(result), try msgpack.expectHandle(result) };
 }
 
 /// Our channel id from `askChannel`'s response.
 pub fn parseChannel(result: *msgpack.Decoder) !i64 {
-    if (try rpc.expectArray(result) < 1) return error.BadMessage;
-    return rpc.expectInt(result);
+    if (try msgpack.expectArray(result) < 1) return error.BadMessage;
+    return msgpack.expectInt(result);
 }
 
 const testing = std.testing;
