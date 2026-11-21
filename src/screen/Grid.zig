@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const msgpack = @import("../nvim/msgpack.zig");
+const msgpack = @import("msgpack");
 
 const Grid = @This();
 

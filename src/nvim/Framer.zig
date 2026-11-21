@@ -1,7 +1,7 @@
 //! Splits a byte stream back into whole msgpack messages.
 
 const std = @import("std");
-const msgpack = @import("msgpack.zig");
+const msgpack = @import("msgpack");
 
 const Framer = @This();
 

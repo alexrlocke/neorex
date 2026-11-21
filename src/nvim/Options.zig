@@ -17,7 +17,7 @@
 //! table of the same name: `decode` walks this struct's fields.
 
 const std = @import("std");
-const msgpack = @import("msgpack.zig");
+const msgpack = @import("msgpack");
 
 const Options = @This();
 

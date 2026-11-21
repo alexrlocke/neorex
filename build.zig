@@ -20,6 +20,13 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
+    const msgpack_mod = b.createModule(.{
+        .root_source_file = b.path("src/msgpack/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+
     const exe = b.addExecutable(.{
         .name = "neorex",
         .root_module = b.createModule(.{
@@ -34,6 +41,7 @@ pub fn build(b: *std.Build) void {
 
     exe.root_module.addImport("rex", rex_mod);
     exe.root_module.addImport("term", term_mod);
+    exe.root_module.addImport("msgpack", msgpack_mod);
 
     b.installArtifact(exe);
     // the colorscheme and lualine theme; neorex finds them from its own path
@@ -77,6 +85,11 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_term.step);
     b.step("test-term", "Run term tests").dependOn(&run_term.step);
 
+    const msgpack_tests = b.addTest(.{ .root_module = msgpack_mod });
+    const run_msgpack = b.addRunArtifact(msgpack_tests);
+    test_step.dependOn(&run_msgpack.step);
+    b.step("test-msgpack", "Run msgpack tests").dependOn(&run_msgpack.step);
+
     // golden tests: renderer output through Ghostty's terminal emulator
     const golden = b.option(bool, "golden", "Run the golden tests too (downloads Ghostty)") orelse false;
     if (!golden) return;
@@ -89,6 +102,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     golden_mod.addImport("ghostty-vt", dep.module("ghostty-vt"));
+    golden_mod.addImport("msgpack", msgpack_mod);
     const golden_tests = b.addTest(.{ .root_module = golden_mod });
     test_step.dependOn(&b.addRunArtifact(golden_tests).step);
 }

@@ -7,8 +7,9 @@ const Grid = @import("screen/Grid.zig");
 const Grids = @import("screen/Grids.zig");
 const Style = @import("screen/Style.zig");
 const render = @import("screen/render.zig");
-const msgpack = @import("nvim/msgpack.zig");
 const Nvim = @import("nvim/Nvim.zig");
+
+const msgpack = @import("msgpack");
 
 const testing = std.testing;
 const gpa = testing.allocator;

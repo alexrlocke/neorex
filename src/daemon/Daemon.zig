@@ -8,9 +8,7 @@
 const std = @import("std");
 const net = std.Io.net;
 const Allocator = std.mem.Allocator;
-const input = @import("term").input;
 const Nvim = @import("../nvim/Nvim.zig");
-const msgpack = @import("../nvim/msgpack.zig");
 const windows = @import("../nvim/windows.zig");
 const Options = @import("../nvim/Options.zig");
 const Forwarder = @import("../nvim/Forwarder.zig");
@@ -28,6 +26,8 @@ const pane_helper = @import("pane_helper.zig");
 const sizing = @import("sizing.zig");
 
 const rex = @import("rex");
+const input = @import("term").input;
+const msgpack = @import("msgpack");
 
 const Daemon = @This();
 

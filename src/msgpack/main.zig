@@ -115,8 +115,7 @@ pub fn expectMap(d: *Decoder) !u32 {
     };
 }
 
-/// A buffer, window or tabpage handle: an ext wrapping an int, or a plain int.
-/// Neovim sends buffer, window and tabpage handles this way.
+/// An ext wrapping an int, or a plain int: how Neovim sends buffer, window and tabpage handles.
 pub fn expectHandle(d: *Decoder) !i64 {
     return switch (try nextToken(d)) {
         .int => |n| n,

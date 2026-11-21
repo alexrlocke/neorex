@@ -3,13 +3,13 @@
 
 const std = @import("std");
 const Writer = std.Io.Writer;
-const msgpack = @import("../nvim/msgpack.zig");
 const rpc = @import("../nvim/rpc.zig");
 const Nvim = @import("../nvim/Nvim.zig");
 const runtime = @import("../nvim/runtime.zig");
 const Forwarder = @import("../nvim/Forwarder.zig");
 
 const term = @import("term");
+const msgpack = @import("msgpack");
 
 // no alternate screen, so the events stay in scrollback
 const modes_on = "\x1b[?2004h\x1b[?1004h" ++ term.input.kitty_push;

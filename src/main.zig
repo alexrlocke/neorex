@@ -62,7 +62,6 @@ fn eql(a: []const u8, b: []const u8) bool {
 
 test {
     // every file, reached from here; golden.zig is its own test module
-    _ = @import("nvim/msgpack.zig");
     _ = @import("nvim/Framer.zig");
     _ = @import("nvim/rpc.zig");
     _ = @import("nvim/Nvim.zig");

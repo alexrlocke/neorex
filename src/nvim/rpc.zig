@@ -1,7 +1,7 @@
 //! msgpack-RPC messages: writing requests and parsing whole messages.
 
 const std = @import("std");
-const msgpack = @import("msgpack.zig");
+const msgpack = @import("msgpack");
 
 /// A parsed message. Slices and decoders point into its bytes.
 pub const Message = union(enum) {

@@ -3,9 +3,10 @@
 //! write requests; the caller flushes.
 
 const std = @import("std");
-const msgpack = @import("msgpack.zig");
 const rpc = @import("rpc.zig");
 const Nvim = @import("Nvim.zig");
+
+const msgpack = @import("msgpack");
 
 const lua = @embedFile("windows.lua");
 

@@ -5,8 +5,9 @@ const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const Framer = @import("Framer.zig");
-const msgpack = @import("msgpack.zig");
 const rpc = @import("rpc.zig");
+
+const msgpack = @import("msgpack");
 
 const Nvim = @This();
 
