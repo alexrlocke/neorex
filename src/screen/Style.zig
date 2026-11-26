@@ -50,6 +50,8 @@ pub const Attr = struct {
     /// RGB color at all: a colorscheme that sets only ctermfg/ctermbg is
     /// drawn in the terminal's own palette, so it follows the terminal's
     /// theme.
+    /// A palette background is also kept under an RGB text
+    /// color that has no palette text color beside it.
     fg_idx: ?u8 = null,
     bg_idx: ?u8 = null,
     bold: bool = false,
@@ -163,9 +165,15 @@ pub fn apply(self: *Style, gpa: Allocator, event: Event, d: *msgpack.Decoder, le
             // A highlight with an RGB color belongs to an RGB colorscheme,
             // whose palette indices are only for 256-color terminals: the
             // default Visual is an RGB background with ctermfg=0 (black).
+            //
+            // The exception is an RGB text color over a palette background
+            // with no palette text color, which no RGB colorscheme has: the
+            // palette background was asked for. A lualine section separator
+            // from an accent-colored section into a palette-colored one.
             if (a.fg != null or a.bg != null or a.sp != null) {
+                const on_palette = a.fg != null and a.bg == null and a.fg_idx == null;
                 a.fg_idx = null;
-                a.bg_idx = null;
+                if (!on_palette) a.bg_idx = null;
             }
             if (id >= self.attrs.items.len) try self.attrs.appendNTimes(gpa, .{}, id + 1 - self.attrs.items.len);
             self.attrs.items[id] = a;
