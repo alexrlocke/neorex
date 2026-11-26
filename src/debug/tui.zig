@@ -5,8 +5,8 @@ const std = @import("std");
 const Nvim = @import("../nvim/Nvim.zig");
 const runtime = @import("../nvim/runtime.zig");
 const Forwarder = @import("../nvim/Forwarder.zig");
-const Grids = @import("../screen/Grids.zig");
-const render = @import("../screen/render.zig");
+const Grids = @import("screen").Grids;
+const render = @import("screen").render;
 
 const term = @import("term");
 

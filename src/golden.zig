@@ -3,10 +3,10 @@
 
 const std = @import("std");
 const vt = @import("ghostty-vt");
-const Grid = @import("screen/Grid.zig");
-const Grids = @import("screen/Grids.zig");
-const Style = @import("screen/Style.zig");
-const render = @import("screen/render.zig");
+const Grid = @import("screen").Grid;
+const Grids = @import("screen").Grids;
+const Style = @import("screen").Style;
+const render = @import("screen").render;
 const Nvim = @import("nvim/Nvim.zig");
 
 const msgpack = @import("msgpack");
@@ -399,7 +399,7 @@ fn settle(nvim: *Nvim, t: *vt.Terminal, gs: *Grids, stats: *Stats) !void {
     }
 }
 
-const PaneView = @import("screen/PaneView.zig");
+const PaneView = @import("screen").PaneView;
 const windows = @import("nvim/windows.zig");
 
 /// A pane for the multigrid test: what it shows and Ghostty's screen of it.

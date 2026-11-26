@@ -4,7 +4,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const windows = @import("../nvim/windows.zig");
-const Grids = @import("../screen/Grids.zig");
+const Grids = @import("screen").Grids;
 
 const WindowChanges = @This();
 

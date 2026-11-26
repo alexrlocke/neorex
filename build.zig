@@ -27,6 +27,13 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
+    const screen_mod = b.createModule(.{
+        .root_source_file = b.path("src/screen/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    screen_mod.addImport("msgpack", msgpack_mod);
+
     const exe = b.addExecutable(.{
         .name = "neorex",
         .root_module = b.createModule(.{
@@ -42,6 +49,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("rex", rex_mod);
     exe.root_module.addImport("term", term_mod);
     exe.root_module.addImport("msgpack", msgpack_mod);
+    exe.root_module.addImport("screen", screen_mod);
 
     b.installArtifact(exe);
     // the colorscheme and lualine theme; neorex finds them from its own path
@@ -90,6 +98,11 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_msgpack.step);
     b.step("test-msgpack", "Run msgpack tests").dependOn(&run_msgpack.step);
 
+    const screen_tests = b.addTest(.{ .root_module = screen_mod });
+    const run_screen = b.addRunArtifact(screen_tests);
+    test_step.dependOn(&run_screen.step);
+    b.step("test-screen", "Run screen tests").dependOn(&run_screen.step);
+
     // integration tests: neorex's pieces against a real Neovim; each skips
     // when nvim isn't installed
     const integration_mod = b.createModule(.{
@@ -99,6 +112,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     integration_mod.addImport("msgpack", msgpack_mod);
+    integration_mod.addImport("screen", screen_mod);
     const integration_tests = b.addTest(.{ .root_module = integration_mod });
     const run_integration = b.addRunArtifact(integration_tests);
     test_step.dependOn(&run_integration.step);
@@ -117,6 +131,7 @@ pub fn build(b: *std.Build) void {
     });
     golden_mod.addImport("ghostty-vt", dep.module("ghostty-vt"));
     golden_mod.addImport("msgpack", msgpack_mod);
+    golden_mod.addImport("screen", screen_mod);
     const golden_tests = b.addTest(.{ .root_module = golden_mod });
     test_step.dependOn(&b.addRunArtifact(golden_tests).step);
 }

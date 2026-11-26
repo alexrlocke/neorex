@@ -3,8 +3,8 @@
 const std = @import("std");
 const testing = std.testing;
 const Nvim = @import("../nvim/Nvim.zig");
-const Grids = @import("../screen/Grids.zig");
-const Grid = @import("../screen/Grid.zig");
+const Grids = @import("screen").Grids;
+const Grid = @import("screen").Grid;
 
 const msgpack = @import("msgpack");
 

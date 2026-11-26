@@ -12,9 +12,6 @@ const Nvim = @import("../nvim/Nvim.zig");
 const windows = @import("../nvim/windows.zig");
 const Options = @import("../nvim/Options.zig");
 const Forwarder = @import("../nvim/Forwarder.zig");
-const Grids = @import("../screen/Grids.zig");
-const FloatGroups = @import("../screen/FloatGroups.zig");
-const PaneView = @import("../screen/PaneView.zig");
 const Loop = @import("loop.zig").Loop;
 const Pane = @import("Pane.zig");
 const Panes = @import("Panes.zig");
@@ -28,6 +25,7 @@ const sizing = @import("sizing.zig");
 const rex = @import("rex");
 const input = @import("term").input;
 const msgpack = @import("msgpack");
+const screen = @import("screen");
 
 const Daemon = @This();
 
@@ -37,7 +35,7 @@ loop: *Loop,
 /// Our executable and the helpers' socket, for new panes' command.
 exe: []const u8,
 sock: []const u8,
-grids: Grids = .{},
+grids: screen.Grids = .{},
 panes: Panes = .{},
 rex_session: rex.Session,
 nvim: NvimSession,
@@ -730,8 +728,8 @@ fn onLayerBounds(self: *Daemon, block: []const u8, bounds: rex.layout.Rect) void
 /// floats ask for, then its size is Rex's: when they ask again, Rex may
 /// grant it (`onFloatsMoved`), and either way they fit what Rex gives.
 fn reconcileLayers(self: *Daemon) !void {
-    var buf: [FloatGroups.max_groups]FloatGroups.Group = undefined;
-    const groups = if (self.rex_session.conn != .closed) FloatGroups.find(&self.grids, self.nvim.enteredFloats(), &buf) else buf[0..0];
+    var buf: [screen.FloatGroups.max_groups]screen.FloatGroups.Group = undefined;
+    const groups = if (self.rex_session.conn != .closed) screen.FloatGroups.find(&self.grids, self.nvim.enteredFloats(), &buf) else buf[0..0];
     var i = self.panes.list.items.len;
     while (i > 0) {
         i -= 1;
@@ -799,11 +797,11 @@ fn refit(self: *Daemon, p: *Pane) !void {
 /// nothing they kept clear of, such as the statusline under which-key. Too
 /// small to hold the frame and a cell, as a one-line notification is, it
 /// grows evenly around them.
-fn layerBounds(self: *const Daemon, g: FloatGroups.Group) ?[4]f64 {
-    const screen = self.grids.get(1) orelse return null;
-    if (screen.width == 0 or screen.height == 0) return null;
-    const sw: f64 = @floatFromInt(screen.width);
-    const sh: f64 = @floatFromInt(screen.height);
+fn layerBounds(self: *const Daemon, g: screen.FloatGroups.Group) ?[4]f64 {
+    const grid1 = self.grids.get(1) orelse return null;
+    if (grid1.width == 0 or grid1.height == 0) return null;
+    const sw: f64 = @floatFromInt(grid1.width);
+    const sh: f64 = @floatFromInt(grid1.height);
     const b = g.box;
     const cells_w = @max(b[2], layer_frame[0] + 1);
     const cells_h = @max(b[3], layer_frame[1] + 1);
@@ -819,15 +817,15 @@ fn layerBounds(self: *const Daemon, g: FloatGroups.Group) ?[4]f64 {
 /// The terminal size, cols x rows, inside a floating pane at `bounds`: its
 /// cells on grid 1, less the frame Rex draws around it.
 fn layerSize(self: *const Daemon, bounds: [4]f64) [2]u32 {
-    const screen = self.grids.get(1) orelse return sizing.rex_default_size;
+    const grid1 = self.grids.get(1) orelse return sizing.rex_default_size;
     const cells = [2]i64{
-        @intFromFloat(@round(bounds[2] * @as(f64, @floatFromInt(screen.width)))),
-        @intFromFloat(@round(bounds[3] * @as(f64, @floatFromInt(screen.height)))),
+        @intFromFloat(@round(bounds[2] * @as(f64, @floatFromInt(grid1.width)))),
+        @intFromFloat(@round(bounds[3] * @as(f64, @floatFromInt(grid1.height)))),
     };
     return .{ @intCast(@max(cells[0] - layer_frame[0], 1)), @intCast(@max(cells[1] - layer_frame[1], 1)) };
 }
 
-fn newLayer(self: *Daemon, g: FloatGroups.Group) !void {
+fn newLayer(self: *Daemon, g: screen.FloatGroups.Group) !void {
     const bounds = self.layerBounds(g) orelse return;
     const pane = try self.panes.addForGroup(self.gpa, g);
     pane.layer.?.bounds = bounds;
@@ -859,8 +857,8 @@ fn newLayer(self: *Daemon, g: FloatGroups.Group) !void {
 
 /// Within half a cell of each other on grid 1.
 fn sameBounds(self: *const Daemon, a: [4]f64, b: [4]f64) bool {
-    const screen = self.grids.get(1) orelse return true;
-    const half = [2]f64{ 0.5 / @as(f64, @floatFromInt(@max(screen.width, 1))), 0.5 / @as(f64, @floatFromInt(@max(screen.height, 1))) };
+    const grid1 = self.grids.get(1) orelse return true;
+    const half = [2]f64{ 0.5 / @as(f64, @floatFromInt(@max(grid1.width, 1))), 0.5 / @as(f64, @floatFromInt(@max(grid1.height, 1))) };
     for (a, b, 0..) |x, y, i| if (@abs(x - y) >= half[i % 2]) return false;
     return true;
 }
@@ -870,16 +868,16 @@ fn sameBounds(self: *const Daemon, a: [4]f64, b: [4]f64) bool {
 fn followLayer(self: *Daemon, p: *Pane) !?u32 {
     const l = if (p.layer) |*l| l else return null;
     const s = p.terminal_surface orelse return null;
-    const screen = self.grids.get(1) orelse return null;
-    if (screen.width == 0 or screen.height == 0) return null;
+    const grid1 = self.grids.get(1) orelse return null;
+    if (grid1.width == 0 or grid1.height == 0) return null;
     // somewhere on the screen, or Neovim moves the floats back onto it and
     // they never get there
-    const w = @min(s.view.cols, screen.width);
-    const h = @min(s.view.rows, screen.height);
-    const at_row: i32 = @as(i32, @intFromFloat(@round(l.bounds[1] * @as(f64, @floatFromInt(screen.height))))) + @divFloor(layer_frame[1], 2);
-    const at_col: i32 = @as(i32, @intFromFloat(@round(l.bounds[0] * @as(f64, @floatFromInt(screen.width))))) + @divFloor(layer_frame[0], 2);
-    const row = std.math.clamp(at_row, 0, @as(i32, @intCast(screen.height - h)));
-    const col = std.math.clamp(at_col, 0, @as(i32, @intCast(screen.width - w)));
+    const w = @min(s.view.cols, grid1.width);
+    const h = @min(s.view.rows, grid1.height);
+    const at_row: i32 = @as(i32, @intFromFloat(@round(l.bounds[1] * @as(f64, @floatFromInt(grid1.height))))) + @divFloor(layer_frame[1], 2);
+    const at_col: i32 = @as(i32, @intFromFloat(@round(l.bounds[0] * @as(f64, @floatFromInt(grid1.width))))) + @divFloor(layer_frame[0], 2);
+    const row = std.math.clamp(at_row, 0, @as(i32, @intCast(grid1.height - h)));
+    const col = std.math.clamp(at_col, 0, @as(i32, @intCast(grid1.width - w)));
     const g = l.group;
     if (std.mem.eql(i64, &g.box, &.{ row, col, w, h })) return null;
     var wins: [16]i64 = undefined;
@@ -903,8 +901,8 @@ fn layerOfWin(self: *const Daemon, win: i64) ?*Pane {
 
 /// A float in group `g` that takes focus: the input of a picker, which
 /// stacks above its box.
-fn focusableIn(self: *const Daemon, g: *const FloatGroups.Group) ?i64 {
-    var best: ?Grids.Win = null;
+fn focusableIn(self: *const Daemon, g: *const screen.FloatGroups.Group) ?i64 {
+    var best: ?screen.Grids.Win = null;
     for (self.grids.wins.keys(), self.grids.wins.values()) |id, w| {
         if (w.kind != .float or !w.float.focusable) continue;
         const top = (self.grids.place(id) orelse continue).top;
@@ -920,7 +918,7 @@ fn focusableIn(self: *const Daemon, g: *const FloatGroups.Group) ?i64 {
 fn draw(self: *Daemon) !void {
     const focused = self.focusedPane();
     // floats in floating panes stay out of the others
-    var skip_buf: [FloatGroups.max_groups * 16]u32 = undefined;
+    var skip_buf: [screen.FloatGroups.max_groups * 16]u32 = undefined;
     var skip_n: usize = 0;
     for (self.panes.list.items) |p| if (p.layerHides()) for (p.layer.?.group.topGrids()) |t| {
         if (skip_n == skip_buf.len) break;
@@ -940,8 +938,8 @@ fn draw(self: *Daemon) !void {
             continue;
         }
         const drawn = if (p.layer) |*l| blk: {
-            var mbuf: [Grids.max_floats]Grids.Placed = undefined;
-            const members = FloatGroups.members(&self.grids, &l.group, &mbuf);
+            var mbuf: [screen.Grids.max_floats]screen.Grids.Placed = undefined;
+            const members = screen.FloatGroups.members(&self.grids, &l.group, &mbuf);
             s.forwarder.grid = if (members.len > 0) members[0].grid else 1;
             // the terminal's top left is where its editor floats start
             const origin = [2]i32{ @intCast(l.group.box[0]), @intCast(l.group.box[1]) };
@@ -966,7 +964,7 @@ fn draw(self: *Daemon) !void {
 }
 
 /// Mouse events on the floats drawn go to their grids.
-fn setTargets(f: *Forwarder, rects: []const PaneView.Rect) void {
+fn setTargets(f: *Forwarder, rects: []const screen.PaneView.Rect) void {
     var buf: [Forwarder.max_targets]Forwarder.Target = undefined;
     const n = @min(rects.len, buf.len);
     for (rects[0..n], buf[0..n]) |r, *t| t.* = .{ .grid = r.grid, .row = r.row, .col = r.col, .width = r.width, .height = r.height };
@@ -976,10 +974,10 @@ fn setTargets(f: *Forwarder, rects: []const PaneView.Rect) void {
 /// Where pane `p`'s top left sits on grid 1: row, col.
 fn paneOrigin(self: *const Daemon, p: *const Pane) [2]i32 {
     const r = p.rect orelse return .{ 0, 0 };
-    const screen = self.grids.get(1) orelse return .{ 0, 0 };
+    const grid1 = self.grids.get(1) orelse return .{ 0, 0 };
     return .{
-        @intFromFloat(@round(r[1] * @as(f64, @floatFromInt(screen.height)))),
-        @intFromFloat(@round(r[0] * @as(f64, @floatFromInt(screen.width)))),
+        @intFromFloat(@round(r[1] * @as(f64, @floatFromInt(grid1.height)))),
+        @intFromFloat(@round(r[0] * @as(f64, @floatFromInt(grid1.width)))),
     };
 }
 

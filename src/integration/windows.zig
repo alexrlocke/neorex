@@ -6,8 +6,8 @@ const testing = std.testing;
 const Nvim = @import("../nvim/Nvim.zig");
 const windows = @import("../nvim/windows.zig");
 const Options = @import("../nvim/Options.zig");
-const Grids = @import("../screen/Grids.zig");
-const Grid = @import("../screen/Grid.zig");
+const Grids = @import("screen").Grids;
+const Grid = @import("screen").Grid;
 
 const msgpack = @import("msgpack");
 

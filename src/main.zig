@@ -70,12 +70,6 @@ test {
     _ = @import("nvim/Options.zig");
     _ = @import("lua_spec.zig");
     _ = @import("nvim/runtime.zig");
-    _ = @import("screen/Grid.zig");
-    _ = @import("screen/Grids.zig");
-    _ = @import("screen/Style.zig");
-    _ = @import("screen/PaneView.zig");
-    _ = @import("screen/FloatGroups.zig");
-    _ = @import("screen/render.zig");
     _ = @import("daemon/loop.zig");
     _ = @import("daemon/fdpass.zig");
     _ = @import("daemon/pane_helper.zig");
