@@ -70,11 +70,92 @@ fn writeTagged(w: *Writer, tag: u8, comptime T: type, value: T) Error!void {
     try w.writeInt(T, value, .big);
 }
 
-fn expectInt(n: i64, expected: []const u8) !void {
+fn expectEncoded(n: i64, expected: []const u8) !void {
     var buf: [16]u8 = undefined;
     var w: Writer = .fixed(&buf);
     try writeInt(&w, n);
     try std.testing.expectEqualSlices(u8, expected, w.buffered());
+}
+
+/// Reads an array header, returning its length.
+pub fn expectArray(d: *Decoder) !u32 {
+    return switch (try nextToken(d)) {
+        .array => |n| n,
+        else => error.BadMessage,
+    };
+}
+
+pub fn expectInt(d: *Decoder) !i64 {
+    return switch (try nextToken(d)) {
+        .int => |n| n,
+        else => error.BadMessage,
+    };
+}
+
+/// Reads a whole string. Needs a whole message, so it's one chunk.
+pub fn expectStr(d: *Decoder) ![]const u8 {
+    return switch (try nextToken(d)) {
+        .str => |len| expectBytes(d, len),
+        else => error.BadMessage,
+    };
+}
+
+pub fn expectBool(d: *Decoder) !bool {
+    return switch (try nextToken(d)) {
+        .bool => |b| b,
+        else => error.BadMessage,
+    };
+}
+
+/// Reads a map header, returning its number of pairs.
+pub fn expectMap(d: *Decoder) !u32 {
+    return switch (try nextToken(d)) {
+        .map => |n| n,
+        else => error.BadMessage,
+    };
+}
+
+/// An ext wrapping an int, or a plain int: how Neovim sends buffer, window and tabpage handles.
+pub fn expectHandle(d: *Decoder) !i64 {
+    return switch (try nextToken(d)) {
+        .int => |n| n,
+        .ext => |e| {
+            var inner: Decoder = .{};
+            inner.feed(try expectBytes(d, e.len));
+            return expectInt(&inner);
+        },
+        else => error.BadMessage,
+    };
+}
+
+/// Skips one whole value, however deeply nested.
+pub fn skip(d: *Decoder) !void {
+    // values still owed; nesting doesn't matter when only counting
+    var owed: u64 = 1;
+    while (owed > 0) : (owed -= 1) {
+        switch (try nextToken(d)) {
+            .array => |n| owed += n,
+            .map => |n| owed += @as(u64, n) * 2,
+            .str, .bin => |len| _ = try expectBytes(d, len),
+            .ext => |e| _ = try expectBytes(d, e.len),
+            .chunk => return error.BadMessage,
+            else => {},
+        }
+    }
+}
+
+/// A token that must exist: the message is whole, so null means it's cut short.
+pub fn nextToken(d: *Decoder) !Token {
+    return (try d.next()) orelse error.BadMessage;
+}
+
+/// The `len` bytes after a str, bin or ext header.
+pub fn expectBytes(d: *Decoder, len: u32) ![]const u8 {
+    if (len == 0) return "";
+    return switch (try nextToken(d)) {
+        .chunk => |c| if (c.len == len) c else error.BadMessage,
+        else => error.BadMessage,
+    };
 }
 
 test "nil and bool" {
@@ -87,27 +168,27 @@ test "nil and bool" {
 }
 
 test "int boundaries" {
-    try expectInt(0, &.{0x00});
-    try expectInt(127, &.{0x7f});
-    try expectInt(128, &.{ 0xcc, 0x80 });
-    try expectInt(255, &.{ 0xcc, 0xff });
-    try expectInt(256, &.{ 0xcd, 0x01, 0x00 });
-    try expectInt(65535, &.{ 0xcd, 0xff, 0xff });
-    try expectInt(65536, &.{ 0xce, 0x00, 0x01, 0x00, 0x00 });
-    try expectInt(4294967295, &.{ 0xce, 0xff, 0xff, 0xff, 0xff });
-    try expectInt(4294967296, &.{ 0xcf, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00 });
-    try expectInt(std.math.maxInt(i64), &.{ 0xcf, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff });
+    try expectEncoded(0, &.{0x00});
+    try expectEncoded(127, &.{0x7f});
+    try expectEncoded(128, &.{ 0xcc, 0x80 });
+    try expectEncoded(255, &.{ 0xcc, 0xff });
+    try expectEncoded(256, &.{ 0xcd, 0x01, 0x00 });
+    try expectEncoded(65535, &.{ 0xcd, 0xff, 0xff });
+    try expectEncoded(65536, &.{ 0xce, 0x00, 0x01, 0x00, 0x00 });
+    try expectEncoded(4294967295, &.{ 0xce, 0xff, 0xff, 0xff, 0xff });
+    try expectEncoded(4294967296, &.{ 0xcf, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00 });
+    try expectEncoded(std.math.maxInt(i64), &.{ 0xcf, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff });
 
-    try expectInt(-1, &.{0xff});
-    try expectInt(-32, &.{0xe0});
-    try expectInt(-33, &.{ 0xd0, 0xdf });
-    try expectInt(-128, &.{ 0xd0, 0x80 });
-    try expectInt(-129, &.{ 0xd1, 0xff, 0x7f });
-    try expectInt(-32768, &.{ 0xd1, 0x80, 0x00 });
-    try expectInt(-32769, &.{ 0xd2, 0xff, 0xff, 0x7f, 0xff });
-    try expectInt(std.math.minInt(i32), &.{ 0xd2, 0x80, 0x00, 0x00, 0x00 });
-    try expectInt(std.math.minInt(i32) - 1, &.{ 0xd3, 0xff, 0xff, 0xff, 0xff, 0x7f, 0xff, 0xff, 0xff });
-    try expectInt(std.math.minInt(i64), &.{ 0xd3, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 });
+    try expectEncoded(-1, &.{0xff});
+    try expectEncoded(-32, &.{0xe0});
+    try expectEncoded(-33, &.{ 0xd0, 0xdf });
+    try expectEncoded(-128, &.{ 0xd0, 0x80 });
+    try expectEncoded(-129, &.{ 0xd1, 0xff, 0x7f });
+    try expectEncoded(-32768, &.{ 0xd1, 0x80, 0x00 });
+    try expectEncoded(-32769, &.{ 0xd2, 0xff, 0xff, 0x7f, 0xff });
+    try expectEncoded(std.math.minInt(i32), &.{ 0xd2, 0x80, 0x00, 0x00, 0x00 });
+    try expectEncoded(std.math.minInt(i32) - 1, &.{ 0xd3, 0xff, 0xff, 0xff, 0xff, 0x7f, 0xff, 0xff, 0xff });
+    try expectEncoded(std.math.minInt(i64), &.{ 0xd3, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 });
 }
 
 test "float" {
@@ -388,4 +469,21 @@ test "decode rejects 0xc1" {
     var d: Decoder = .{};
     d.feed("\xc1");
     try std.testing.expectError(error.InvalidByte, d.next());
+}
+
+test "handles" {
+    // window 1000 as ext 1, then a plain 7, then -1 as fixext 1
+    var d: Decoder = .{};
+    d.feed("\xc7\x03\x01\xcd\x03\xe8\x07\xd4\x01\xff");
+    try std.testing.expectEqual(@as(i64, 1000), try expectHandle(&d));
+    try std.testing.expectEqual(@as(i64, 7), try expectHandle(&d));
+    try std.testing.expectEqual(@as(i64, -1), try expectHandle(&d));
+}
+
+test "skip" {
+    // [1, {2: "ab"}, nil] then 9
+    var d: Decoder = .{};
+    d.feed("\x93\x01\x81\x02\xa2ab\xc0\x09");
+    try skip(&d);
+    try std.testing.expectEqual(@as(i64, 9), try expectInt(&d));
 }

@@ -5,7 +5,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Pane = @import("Pane.zig");
 const Loop = @import("loop.zig").Loop;
-const FloatGroups = @import("../screen/FloatGroups.zig");
+const FloatGroups = @import("screen").FloatGroups;
 
 const Panes = @This();
 

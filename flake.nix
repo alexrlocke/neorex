@@ -7,9 +7,13 @@
     # ZLS (Zig language server) for 0.17 comes from unstable nixpkgs.
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     zig-overlay.inputs.nixpkgs.follows = "nixpkgs";
+    # Neovim nightly for the dev shell: neorex is developed against it, and
+    # nixpkgs has only releases. Not following our nixpkgs keeps its builds
+    # in nix-community.cachix.org, so CI downloads it instead of building it.
+    neovim-nightly-overlay.url = "github:nix-community/neovim-nightly-overlay";
   };
 
-  outputs = { self, nixpkgs, zig-overlay, ... }:
+  outputs = { self, nixpkgs, zig-overlay, neovim-nightly-overlay, ... }:
     let
       # nixpkgs unstable has dropped x86_64-darwin; Intel Macs use the release binaries
       systems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" ];
@@ -48,6 +52,8 @@
           packages = [
             zig-overlay.packages.${pkgs.stdenv.hostPlatform.system}."0.17.0"
             pkgs.zls_0_17 # language server; keep its minor version in step with zig
+            # the integration tests drive a real Neovim; CI runs them in this shell
+            neovim-nightly-overlay.packages.${pkgs.stdenv.hostPlatform.system}.default
           ];
         };
       });

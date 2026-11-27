@@ -3,9 +3,10 @@
 
 const std = @import("std");
 const Writer = std.Io.Writer;
-const input = @import("../term/input.zig");
-const msgpack = @import("msgpack.zig");
+const input = @import("term").input;
 const Nvim = @import("Nvim.zig");
+
+const msgpack = @import("msgpack");
 
 const Forwarder = @This();
 

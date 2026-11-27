@@ -17,8 +17,7 @@
 //! table of the same name: `decode` walks this struct's fields.
 
 const std = @import("std");
-const msgpack = @import("msgpack.zig");
-const rpc = @import("rpc.zig");
+const msgpack = @import("msgpack");
 
 const Options = @This();
 
@@ -48,7 +47,7 @@ pub const default: Options = .{};
 /// nil when unset. A part that's wrong keeps its default and is described,
 /// a line each, on `problems`; only a malformed message is an error.
 pub fn decode(params: *msgpack.Decoder, problems: *std.Io.Writer) !Options {
-    if (try rpc.expectArray(params) < 1) return error.BadMessage;
+    if (try msgpack.expectArray(params) < 1) return error.BadMessage;
     var o: Options = .{};
     try readValue(Options, "neorex_config", &o, params, problems);
     return o;
@@ -116,7 +115,7 @@ fn readValue(comptime T: type, comptime path: []const u8, out: *T, d: *msgpack.D
     const t = try nextToken(d);
     switch (@typeInfo(T)) {
         .@"enum" => if (t == .str) {
-            const s = try rpc.expectBytes(d, t.str);
+            const s = try msgpack.expectBytes(d, t.str);
             if (std.meta.stringToEnum(T, s)) |v| {
                 out.* = v;
             } else problem(problems, "{s}: expected {s}, got \"{s}\"", .{ path, comptime expected(T), s });
@@ -146,10 +145,10 @@ fn readTable(comptime T: type, comptime path: []const u8, out: *T, d: *msgpack.D
         if (kt != .str) {
             problem(problems, "{s}: option names are strings, got {s}", .{ path, kindOf(kt) });
             try skipAfter(d, kt);
-            try rpc.skip(d);
+            try msgpack.skip(d);
             continue;
         }
-        const key = try rpc.expectBytes(d, kt.str);
+        const key = try msgpack.expectBytes(d, kt.str);
         var known = false;
         const info = @typeInfo(T).@"struct";
         inline for (info.field_names, info.field_types) |name, F| {
@@ -160,7 +159,7 @@ fn readTable(comptime T: type, comptime path: []const u8, out: *T, d: *msgpack.D
         }
         if (!known) {
             problem(problems, "{s}.{s}: no such option", .{ path, key });
-            try rpc.skip(d);
+            try msgpack.skip(d);
         }
     }
 }
@@ -206,10 +205,10 @@ fn nextToken(d: *msgpack.Decoder) !msgpack.Token {
 /// Skips the rest of a value whose first token was `t`.
 fn skipAfter(d: *msgpack.Decoder, t: msgpack.Token) !void {
     switch (t) {
-        .array => |n| for (0..n) |_| try rpc.skip(d),
-        .map => |n| for (0..@as(u64, n) * 2) |_| try rpc.skip(d),
-        .str, .bin => |len| _ = try rpc.expectBytes(d, len),
-        .ext => |e| _ = try rpc.expectBytes(d, e.len),
+        .array => |n| for (0..n) |_| try msgpack.skip(d),
+        .map => |n| for (0..@as(u64, n) * 2) |_| try msgpack.skip(d),
+        .str, .bin => |len| _ = try msgpack.expectBytes(d, len),
+        .ext => |e| _ = try msgpack.expectBytes(d, e.len),
         else => {},
     }
 }

@@ -5,8 +5,9 @@ const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const Framer = @import("Framer.zig");
-const msgpack = @import("msgpack.zig");
 const rpc = @import("rpc.zig");
+
+const msgpack = @import("msgpack");
 
 const Nvim = @This();
 
@@ -170,95 +171,6 @@ pub fn next(self: *Nvim) !?rpc.Message {
     return try rpc.parse(bytes);
 }
 
-/// Starts Neovim for a test, or skips the test if it isn't installed.
-fn spawnForTest(buffer: []u8) !Nvim {
-    return spawn(std.testing.io, &.{ "nvim", "--clean", "--embed" }, buffer) catch |err| switch (err) {
-        error.FileNotFound => error.SkipZigTest,
-        else => err,
-    };
-}
-
-/// Reads until the response to `id`, skipping other messages.
-fn waitResponse(nvim: *Nvim, gpa: Allocator, id: u32) !rpc.Message.Response {
-    while (true) {
-        while (try nvim.next()) |msg| switch (msg) {
-            .response => |r| if (r.id == id) return r,
-            else => {},
-        };
-        if (!try nvim.read(gpa)) return error.NvimExited;
-    }
-}
-
-test "eval" {
-    const gpa = std.testing.allocator;
-    var buf: [256]u8 = undefined;
-    var nvim = try spawnForTest(&buf);
-    defer nvim.deinit(gpa);
-
-    const id = try nvim.request("nvim_eval", 1);
-    try msgpack.writeStr(nvim.writer(), "1+2");
-    try nvim.flush();
-
-    var r = try waitResponse(&nvim, gpa, id);
-    try std.testing.expectEqual(@as(?[]const u8, null), r.err);
-    try std.testing.expectEqual(@as(i64, 3), try rpc.expectInt(&r.result));
-}
-
-test "error response" {
-    const gpa = std.testing.allocator;
-    var buf: [256]u8 = undefined;
-    var nvim = try spawnForTest(&buf);
-    defer nvim.deinit(gpa);
-
-    const id = try nvim.request("nvim_eval", 1);
-    try msgpack.writeStr(nvim.writer(), "no_such_variable");
-    try nvim.flush();
-
-    const r = try waitResponse(&nvim, gpa, id);
-    try std.testing.expect(std.mem.indexOf(u8, r.err.?, "no_such_variable") != null);
-}
-
-test "a resize to the same size isn't sent" {
-    const gpa = std.testing.allocator;
-    var buf: [256]u8 = undefined;
-    var nvim = try spawnForTest(&buf);
-    defer nvim.deinit(gpa);
-    try nvim.uiAttach(40, 10, .{});
-    const before = nvim.next_id;
-    try nvim.uiTryResize(40, 10);
-    try std.testing.expectEqual(before, nvim.next_id);
-    try nvim.uiTryResize(30, 8);
-    try std.testing.expectEqual(before + 1, nvim.next_id);
-}
-
-test "connect to a listening neovim" {
-    const gpa = std.testing.allocator;
-    const io = std.testing.io;
-    const path = "/tmp/neorex-test-connect.sock";
-    var server = std.process.spawn(io, .{
-        .argv = &.{ "nvim", "--clean", "--headless", "--listen", path },
-        .stdin = .ignore,
-        .stdout = .ignore,
-        .stderr = .ignore,
-    }) catch |err| switch (err) {
-        error.FileNotFound => return error.SkipZigTest,
-        else => return err,
-    };
-    defer {
-        _ = std.c.kill(server.id.?, .HUP);
-        _ = server.wait(io) catch {};
-    }
-
-    var buf: [256]u8 = undefined;
-    var nvim = try connectRetry(io, path, &buf);
-    defer nvim.deinit(gpa);
-    const id = try nvim.request("nvim_eval", 1);
-    try msgpack.writeStr(nvim.writer(), "1+2");
-    try nvim.flush();
-    var r = try waitResponse(&nvim, gpa, id);
-    try std.testing.expectEqual(@as(i64, 3), try rpc.expectInt(&r.result));
-}
-
 /// `connect`, retrying for up to 2 s: Neovim makes its socket a moment after starting.
 pub fn connectRetry(io: Io, path: []const u8, buffer: []u8) !Nvim {
     for (0..200) |_| {
@@ -268,21 +180,4 @@ pub fn connectRetry(io: Io, path: []const u8, buffer: []u8) !Nvim {
         };
     }
     return error.Timeout;
-}
-
-test "large reply over several reads" {
-    const gpa = std.testing.allocator;
-    var buf: [256]u8 = undefined;
-    var nvim = try spawnForTest(&buf);
-    defer nvim.deinit(gpa);
-
-    _ = try nvim.request("nvim_get_api_info", 0);
-    const id = try nvim.request("nvim_get_api_info", 0); // two in flight
-    try nvim.flush();
-
-    // [channel id, {version, functions, ...}]
-    var r = try waitResponse(&nvim, gpa, id);
-    try std.testing.expectEqual(@as(u32, 2), try rpc.expectArray(&r.result));
-    try std.testing.expect(try rpc.expectInt(&r.result) > 0);
-    try rpc.skip(&r.result);
 }

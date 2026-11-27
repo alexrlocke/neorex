@@ -3,54 +3,50 @@
 
 const std = @import("std");
 const Writer = std.Io.Writer;
-const Terminal = @import("../term/Terminal.zig");
-const Signals = @import("../term/Signals.zig");
-const input = @import("../term/input.zig");
-const msgpack = @import("../nvim/msgpack.zig");
-const rpc = @import("../nvim/rpc.zig");
-const Nvim = @import("../nvim/Nvim.zig");
-const runtime = @import("../nvim/runtime.zig");
-const Forwarder = @import("../nvim/Forwarder.zig");
+
+const term = @import("term");
+const msgpack = @import("msgpack");
+const nvim = @import("nvim");
 
 // no alternate screen, so the events stay in scrollback
-const modes_on = "\x1b[?2004h\x1b[?1004h" ++ input.kitty_push;
-const modes_off = input.kitty_pop ++ "\x1b[?1004l\x1b[?2004l";
+const modes_on = "\x1b[?2004h\x1b[?1004h" ++ term.input.kitty_push;
+const modes_off = term.input.kitty_pop ++ "\x1b[?1004l\x1b[?2004l";
 
 /// Runs `nvim --embed` plus `nvim_args`.
 pub fn run(gpa: std.mem.Allocator, io: std.Io, nvim_args: []const []const u8) !void {
     var out_buf: [16 * 1024]u8 = undefined;
-    var term = try Terminal.init(std.posix.STDIN_FILENO, &out_buf);
-    defer term.deinit();
+    var terminal = try term.Terminal.init(std.posix.STDIN_FILENO, &out_buf);
+    defer terminal.deinit();
 
-    var signals = try Signals.init(&.{.WINCH});
+    var signals = try term.Signals.init(&.{.WINCH});
     defer signals.deinit();
 
-    const out = &term.writer;
+    const out = &terminal.writer;
     try out.writeAll(modes_on);
     defer out.writeAll(modes_off) catch {};
 
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
-    var cmd_buf: [runtime.cmd_len]u8 = undefined;
-    try argv.appendSlice(gpa, &.{ "nvim", "--embed", "--cmd", try runtime.cmd(io, &cmd_buf) });
+    var cmd_buf: [nvim.runtime.cmd_len]u8 = undefined;
+    try argv.appendSlice(gpa, &.{ "nvim", "--embed", "--cmd", try nvim.runtime.cmd(io, &cmd_buf) });
     try argv.appendSlice(gpa, nvim_args);
 
     var nvim_buf: [4096]u8 = undefined;
-    var nvim = try Nvim.spawn(io, argv.items, &nvim_buf);
-    defer nvim.deinit(gpa);
+    var nvim_client = try nvim.Nvim.spawn(io, argv.items, &nvim_buf);
+    defer nvim_client.deinit(gpa);
 
-    const ws = try term.size();
-    try nvim.uiAttach(ws.col, ws.row, .{});
+    const ws = try terminal.size();
+    try nvim_client.uiAttach(ws.col, ws.row, .{});
     try out.print("debug-events: attached at {d}x{d}. Ctrl+Q or :q quits.\r\n", .{ ws.col, ws.row });
-    try term.flush();
+    try terminal.flush();
 
-    var forwarder: Forwarder = .{};
+    var forwarder: nvim.Forwarder = .{};
     var buf: [4096]u8 = undefined;
     while (true) {
         var fds = [_]std.c.pollfd{
-            .{ .fd = term.fd, .events = std.c.POLL.IN, .revents = 0 },
+            .{ .fd = terminal.fd, .events = std.c.POLL.IN, .revents = 0 },
             .{ .fd = signals.read_fd, .events = std.c.POLL.IN, .revents = 0 },
-            .{ .fd = nvim.readFd(), .events = std.c.POLL.IN, .revents = 0 },
+            .{ .fd = nvim_client.readFd(), .events = std.c.POLL.IN, .revents = 0 },
         };
         const ready = std.c.poll(&fds, fds.len, -1);
         if (ready < 0) {
@@ -61,34 +57,34 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, nvim_args: []const []const u8) !v
         if (fds[1].revents != 0) {
             const fired = try signals.drain();
             if (fired.contains(.WINCH)) {
-                const size = try term.size();
-                try nvim.uiTryResize(size.col, size.row);
+                const size = try terminal.size();
+                try nvim_client.uiTryResize(size.col, size.row);
             }
         }
 
         if (fds[2].revents != 0) {
-            if (!try nvim.read(gpa)) {
+            if (!try nvim_client.read(gpa)) {
                 try out.writeAll("neovim exited\r\n");
                 return;
             }
-            while (try nvim.next()) |msg| try printMessage(&nvim, out, msg);
-            try term.flush();
+            while (try nvim_client.next()) |msg| try printMessage(&nvim_client, out, msg);
+            try terminal.flush();
         }
 
         if (fds[0].revents != 0) {
-            const n = std.c.read(term.fd, &buf, buf.len);
+            const n = std.c.read(terminal.fd, &buf, buf.len);
             if (n < 0) {
                 if (std.c.errno(n) == .INTR) continue;
                 return error.ReadFailed;
             }
             if (n == 0) return;
-            if (!try forwarder.feed(&nvim, buf[0..@intCast(n)])) return;
+            if (!try forwarder.feed(&nvim_client, buf[0..@intCast(n)])) return;
         }
     }
 }
 
 /// One line per redraw event; errors and other messages in brief.
-fn printMessage(nvim: *Nvim, out: *Writer, msg: rpc.Message) !void {
+fn printMessage(nvim_client: *nvim.Nvim, out: *Writer, msg: nvim.rpc.Message) !void {
     switch (msg) {
         .response => |r| if (r.err) |e| {
             try out.writeAll("error: ");
@@ -98,7 +94,7 @@ fn printMessage(nvim: *Nvim, out: *Writer, msg: rpc.Message) !void {
         .request => |r| {
             // nothing here serves requests; answer so Neovim doesn't wait
             try out.print("request {s} (refused)\r\n", .{r.method});
-            try nvim.respondError(r.id, "neorex debug-events serves no requests");
+            try nvim_client.respondError(r.id, "neorex debug-events serves no requests");
         },
         .notification => |note| {
             if (!std.mem.eql(u8, note.method, "redraw")) {
@@ -107,11 +103,11 @@ fn printMessage(nvim: *Nvim, out: *Writer, msg: rpc.Message) !void {
             }
             // params: [[name, args, args, ...], ...]
             var d = note.params;
-            const events = try rpc.expectArray(&d);
+            const events = try msgpack.expectArray(&d);
             for (0..events) |_| {
-                const len = try rpc.expectArray(&d);
+                const len = try msgpack.expectArray(&d);
                 if (len == 0) return error.BadMessage;
-                const name = try rpc.expectStr(&d);
+                const name = try msgpack.expectStr(&d);
                 for (1..len) |_| {
                     try out.print("{s} ", .{name});
                     try printValue(&d, out);
@@ -150,13 +146,13 @@ fn printValue(d: *msgpack.Decoder, out: *Writer) !void {
         },
         .str => |len| {
             try out.writeByte('"');
-            try writeEscaped(out, try rpc.expectBytes(d, len));
+            try writeEscaped(out, try msgpack.expectBytes(d, len));
             try out.writeByte('"');
         },
-        .bin => |len| try out.print("bin({d})", .{(try rpc.expectBytes(d, len)).len}),
+        .bin => |len| try out.print("bin({d})", .{(try msgpack.expectBytes(d, len)).len}),
         // buffer, window and tabpage handles: an int packed inside
         .ext => |e| {
-            const payload = try rpc.expectBytes(d, e.len);
+            const payload = try msgpack.expectBytes(d, e.len);
             var inner: msgpack.Decoder = .{};
             inner.feed(payload);
             const names = [_][]const u8{ "buf", "win", "tab" };

@@ -2,13 +2,12 @@
 //! and what Neovim was last told about focus.
 
 const std = @import("std");
-const Nvim = @import("../nvim/Nvim.zig");
-const windows = @import("../nvim/windows.zig");
+const nvim = @import("nvim");
 const Pane = @import("Pane.zig");
 
 const NvimSession = @This();
 
-client: *Nvim,
+client: *nvim.Nvim,
 /// Neovim's current window, as the Lua last said; 0 before setup.
 current_win: i64 = 0,
 /// A `nvim_set_current_win` of ours not answered yet. Reports sent before
@@ -49,7 +48,7 @@ pub fn enteredFloats(self: *const NvimSession) []const i64 {
 /// Attaches as Neovim's UI at `cols` x `rows` and asks for our channel.
 pub fn attachUi(self: *NvimSession, cols: u32, rows: u32) !void {
     try self.client.uiAttach(cols, rows, .{ .ext_termcolors = true, .ext_multigrid = true });
-    self.channel_req = try windows.askChannel(self.client);
+    self.channel_req = try nvim.windows.askChannel(self.client);
     try self.client.flush();
 }
 

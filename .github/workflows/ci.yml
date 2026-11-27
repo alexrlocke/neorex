@@ -25,9 +25,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: mlugg/setup-zig@v2
+      # the flake's dev shell, so CI has the same Zig and Neovim nightly as
+      # development. nix-community's cache has Neovim nightly built.
+      - uses: cachix/install-nix-action@v31
         with:
-          version: 0.17.0
+          extra_nix_config: |
+            extra-substituters = https://nix-community.cachix.org
+            extra-trusted-public-keys = nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs=
 
+      # -Dnvim-required: the tests that drive Neovim fail, not skip, if it
+      # isn't there. -Dgolden: the golden tests too.
       - name: Test
-        run: zig build test -Doptimize=${{ matrix.optimize }} --summary all
+        run: nix develop -c zig build test -Doptimize=${{ matrix.optimize }} -Dgolden -Dnvim-required --summary all

@@ -5,7 +5,7 @@
 
 const std = @import("std");
 const net = std.Io.net;
-const Signals = @import("../term/Signals.zig");
+const Signals = @import("term").Signals;
 const fdpass = @import("fdpass.zig");
 
 /// What a helper sends the daemon, one byte each.

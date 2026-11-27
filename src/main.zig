@@ -61,25 +61,8 @@ fn eql(a: []const u8, b: []const u8) bool {
 }
 
 test {
-    // every file, reached from here; golden.zig is its own test module
-    _ = @import("term/Terminal.zig");
-    _ = @import("term/Signals.zig");
-    _ = @import("term/input.zig");
-    _ = @import("nvim/msgpack.zig");
-    _ = @import("nvim/Framer.zig");
-    _ = @import("nvim/rpc.zig");
-    _ = @import("nvim/Nvim.zig");
-    _ = @import("nvim/Forwarder.zig");
-    _ = @import("nvim/windows.zig");
-    _ = @import("nvim/Options.zig");
-    _ = @import("lua_spec.zig");
-    _ = @import("nvim/runtime.zig");
-    _ = @import("screen/Grid.zig");
-    _ = @import("screen/Grids.zig");
-    _ = @import("screen/Style.zig");
-    _ = @import("screen/PaneView.zig");
-    _ = @import("screen/FloatGroups.zig");
-    _ = @import("screen/render.zig");
+    // every file of the app; the modules, integration_tests.zig and
+    // golden_tests.zig are their own test modules
     _ = @import("daemon/loop.zig");
     _ = @import("daemon/fdpass.zig");
     _ = @import("daemon/pane_helper.zig");
@@ -89,18 +72,11 @@ test {
     _ = @import("daemon/WindowChanges.zig");
     _ = @import("daemon/Titles.zig");
     _ = @import("daemon/Surface.zig");
-    _ = @import("rex/server.zig");
     _ = @import("daemon/sizing.zig");
+    _ = @import("daemon/policy.zig");
     _ = @import("daemon/Daemon.zig");
-    _ = @import("term/modes.zig");
     _ = launch;
     _ = serve;
-    _ = @import("rex/WebSocket.zig");
-    _ = @import("rex/Client.zig");
-    _ = @import("rex/Session.zig");
-    _ = @import("rex/layout.zig");
-    _ = @import("rex/ids.zig");
-    _ = @import("rex/LayoutTree.zig");
     _ = @import("debug/PaneHost.zig");
     _ = debug_keys;
     _ = debug_events;

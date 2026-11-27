@@ -3,8 +3,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const msgpack = @import("../nvim/msgpack.zig");
-const rpc = @import("../nvim/rpc.zig");
+const msgpack = @import("msgpack");
 
 const Grid = @This();
 
@@ -93,14 +92,14 @@ pub fn line(self: *Grid, d: *msgpack.Decoder, r: u32, col: u32) !void {
     var c = col;
     // an absent hl_id means the previous cell's
     var hl: u32 = 0;
-    const count = try rpc.expectArray(d);
+    const count = try msgpack.expectArray(d);
     for (0..count) |_| {
-        const len = try rpc.expectArray(d);
+        const len = try msgpack.expectArray(d);
         if (len == 0) return error.BadMessage;
-        const text = try rpc.expectStr(d);
+        const text = try msgpack.expectStr(d);
         if (len >= 2) hl = try expectInt(d, u32);
         const repeat: u32 = if (len >= 3) try expectInt(d, u32) else 1;
-        for (3..@max(len, 3)) |_| try rpc.skip(d);
+        for (3..@max(len, 3)) |_| try msgpack.skip(d);
         const cell: Cell = .init(text, hl);
         for (0..repeat) |_| {
             if (c >= self.width) return error.BadMessage;
@@ -160,7 +159,7 @@ fn copyRow(self: *Grid, from: u32, to: u32, left: u32, w: u32) void {
 }
 
 fn expectInt(d: *msgpack.Decoder, comptime T: type) !T {
-    return std.math.cast(T, try rpc.expectInt(d)) orelse error.BadMessage;
+    return std.math.cast(T, try msgpack.expectInt(d)) orelse error.BadMessage;
 }
 
 const testing = std.testing;

@@ -85,6 +85,13 @@ zig build test
 zig build test -Dgolden   # also the golden tests; downloads Ghostty once
 ```
 
+`zig build test` runs `test:unit` (the app and each module; `test:nvim`,
+`test:screen` and so on run one), `test:integration` (against your `nvim`) and
+`test:fmt`. `-Dtest-filter="name"` runs only matching tests. Tests that need
+Neovim skip without it; `-Dnvim-required` fails them instead, as CI does.
+`nix develop` has the Zig and Neovim nightly CI uses. `zig build -l`
+lists every step.
+
 The golden tests check every frame neorex draws against
 [Ghostty](https://github.com/ghostty-org/ghostty)'s terminal emulator, pinned
 to one commit.

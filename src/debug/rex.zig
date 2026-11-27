@@ -4,10 +4,10 @@
 
 const std = @import("std");
 const Loop = @import("../daemon/loop.zig").Loop;
-const Client = @import("../rex/Client.zig");
-const rex_server = @import("../rex/server.zig");
 const PaneHost = @import("PaneHost.zig");
 const debug_panes = @import("panes.zig");
+
+const rex = @import("rex");
 
 const token_signal = 0;
 const token_server = 1;
@@ -17,9 +17,9 @@ const token_panes = 3;
 pub fn run(gpa: std.mem.Allocator, io: std.Io, socket_path: []const u8) !void {
     // the pane starts elsewhere, so the path must work from any directory
     if (!std.fs.path.isAbsolute(socket_path)) return error.SocketPathNotAbsolute;
-    const server_url = try rex_server.url(gpa, io);
+    const server_url = try rex.server.url(gpa, io);
     defer gpa.free(server_url);
-    const session_id = try rex_server.sessionId(gpa, io);
+    const session_id = try rex.server.sessionId(gpa, io);
     defer gpa.free(session_id);
     const anchor_id: ?[]const u8 = if (std.c.getenv("REX_BLOCK")) |b| std.mem.span(b) else null;
     var exe_buf: [1024]u8 = undefined;
@@ -36,16 +36,16 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, socket_path: []const u8) !void {
     try loop.addRead(server.socket.handle, token_server);
 
     var rex_buf: [4096]u8 = undefined;
-    var rex: Client = try .connect(gpa, io, server_url, &rex_buf);
-    defer rex.deinit(gpa);
-    try loop.addRead(rex.fd(), token_rex);
+    var rex_client: rex.Client = try .connect(gpa, io, server_url, &rex_buf);
+    defer rex_client.deinit(gpa);
+    try loop.addRead(rex_client.fd(), token_rex);
     std.debug.print("debug-rex: connected to {s}. Ctrl+C quits.\n", .{server_url});
 
     var out_bufs: PaneHost.OutBufs = undefined;
     var host: PaneHost = .{ .out_bufs = &out_bufs, .base = token_panes, .name = "debug-rex" };
     defer host.deinit(io, &loop);
 
-    const attach_id = try rex.request(gpa, "session.attach", .{ .session_id = session_id });
+    const attach_id = try rex_client.request(gpa, "session.attach", .{ .session_id = session_id });
     var split_id: ?u64 = null;
 
     var events: [16]Loop.Event = undefined;
@@ -58,11 +58,11 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, socket_path: []const u8) !void {
             },
             token_server => pending_accept = true,
             token_rex => {
-                if (!try rex.read(gpa)) {
+                if (!try rex_client.read(gpa)) {
                     std.debug.print("rex: server hung up\n", .{});
                     return;
                 }
-                while (try rex.next(gpa)) |m| switch (m) {
+                while (try rex_client.next(gpa)) |m| switch (m) {
                     .response => |r| {
                         switch (r.result) {
                             .ok => |v| std.debug.print("rex: response {d}: {f}\n", .{ r.id, std.json.fmt(v, .{}) }),
@@ -70,12 +70,12 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, socket_path: []const u8) !void {
                         }
                         if (r.result == .err and (r.id == attach_id or r.id == split_id)) return error.RexRequestFailed;
                         // creating made us the owner, which sizes it; let the app size it instead
-                        if (r.id == split_id) _ = try rex.request(gpa, "session.disown_block", .{
+                        if (r.id == split_id) _ = try rex_client.request(gpa, "session.disown_block", .{
                             .session_id = session_id,
-                            .block_ids = Client.get(r.result.ok, "block_ids") orelse .null,
+                            .block_ids = rex.Client.get(r.result.ok, "block_ids") orelse .null,
                         });
                         // the split names the session, so it waits for the attach
-                        if (r.id == attach_id) split_id = try rex.request(gpa, "session.new_split", .{
+                        if (r.id == attach_id) split_id = try rex_client.request(gpa, "session.new_split", .{
                             .session_id = session_id,
                             .anchor_id = anchor_id,
                             .direction = "horizontal",
