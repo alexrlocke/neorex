@@ -108,14 +108,16 @@ fn add(self: *LayoutTree, gpa: Allocator, v: Value) (Allocator.Error || error{Ma
     const ratio = layout.asNumber(sp.object.get("ratio") orelse return error.Malformed) orelse return error.Malformed;
     const before = try self.add(gpa, sp.object.get("before") orelse return error.Malformed);
     const after = try self.add(gpa, sp.object.get("after") orelse return error.Malformed);
-    self.nodes.items[at].kind = .{ .split = .{
-        .id = fixed(42, Client.str(sp.object.get("split_id"))),
-        // Rex: draw a direction you don't know as horizontal
-        .direction = Client.getEnum(Direction, sp, "direction") orelse .horizontal,
-        .ratio = ratio,
-        .before = before,
-        .after = after,
-    } };
+    self.nodes.items[at].kind = .{
+        .split = .{
+            .id = fixed(42, Client.str(sp.object.get("split_id"))),
+            // Rex: draw a direction you don't know as horizontal
+            .direction = Client.getEnum(Direction, sp, "direction") orelse .horizontal,
+            .ratio = ratio,
+            .before = before,
+            .after = after,
+        },
+    };
     return at;
 }
 
