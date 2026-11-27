@@ -4,7 +4,7 @@
 const std = @import("std");
 const net = std.Io.net;
 
-const Forwarder = @import("../nvim/Forwarder.zig");
+const Forwarder = @import("nvim").Forwarder;
 const PaneView = @import("screen").PaneView;
 
 const term = @import("term");

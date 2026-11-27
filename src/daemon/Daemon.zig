@@ -8,10 +8,6 @@
 const std = @import("std");
 const net = std.Io.net;
 const Allocator = std.mem.Allocator;
-const Nvim = @import("../nvim/Nvim.zig");
-const windows = @import("../nvim/windows.zig");
-const Options = @import("../nvim/Options.zig");
-const Forwarder = @import("../nvim/Forwarder.zig");
 const Loop = @import("loop.zig").Loop;
 const Pane = @import("Pane.zig");
 const Panes = @import("Panes.zig");
@@ -26,6 +22,7 @@ const rex = @import("rex");
 const input = @import("term").input;
 const msgpack = @import("msgpack");
 const screen = @import("screen");
+const nvim = @import("nvim");
 
 const Daemon = @This();
 
@@ -38,13 +35,13 @@ sock: []const u8,
 grids: screen.Grids = .{},
 panes: Panes = .{},
 rex_session: rex.Session,
-nvim: NvimSession,
+nvim_session: NvimSession,
 changes: WindowChanges = .{},
 titles: Titles = .{},
 /// Rex's tiled layout of the window holding our panes, as its last view had it.
 rex_layout: rex.LayoutTree = .{},
 /// What `vim.g.neorex_config` last chose, as applied.
-options: Options = .default,
+options: nvim.Options = .default,
 /// Set by `stop`; `run` returns it.
 stopped: ?StopReason = null,
 
@@ -96,7 +93,7 @@ pub fn start(self: *Daemon, launch_pane: Pane) !void {
 
     try pane.registerWith(self.loop);
     const view = pane.terminal_surface.?.view;
-    try self.nvim.attachUi(view.cols, view.rows);
+    try self.nvim_session.attachUi(view.cols, view.rows);
     try self.rex_session.attach();
 }
 
@@ -153,7 +150,7 @@ fn handle(self: *Daemon, e: Loop.Event) !void {
 /// moment, in case another pane gains it.
 fn afterBatch(self: *Daemon) !void {
     try self.sendFocus(false);
-    try self.titles.sync(self.gpa, &self.panes, &self.rex_session, self.nvim.current_win);
+    try self.titles.sync(self.gpa, &self.panes, &self.rex_session, self.nvim_session.current_win);
 }
 
 fn sendFocus(self: *Daemon, waited: bool) !void {
@@ -163,12 +160,12 @@ fn sendFocus(self: *Daemon, waited: bool) !void {
         known = true;
         any = any or f;
     };
-    if (!known or any == self.nvim.ui_focused) return;
+    if (!known or any == self.nvim_session.ui_focused) return;
     if (!any and !waited) return self.addTimer(.focus_timer, focus_out_delay_ms);
-    self.nvim.ui_focused = any;
-    _ = try self.nvim.client.request("nvim_ui_set_focus", 1);
-    try msgpack.writeBool(self.nvim.client.writer(), any);
-    try self.nvim.client.flush();
+    self.nvim_session.ui_focused = any;
+    _ = try self.nvim_session.client.request("nvim_ui_set_focus", 1);
+    try msgpack.writeBool(self.nvim_session.client.writer(), any);
+    try self.nvim_session.client.flush();
 }
 
 // panes
@@ -194,7 +191,7 @@ fn accept(self: *Daemon, server: *net.Server) !void {
     }
     try self.sizeWindow(pane);
     if (pane.layer != null) try self.refit(pane);
-    try self.nvim.client.flush();
+    try self.nvim_session.client.flush();
     try self.draw();
 }
 
@@ -208,7 +205,7 @@ fn layoutWaitOver(self: *Daemon) !void {
         if (p.layer != null) try self.refit(p) else try self.sizeWindow(p);
     };
     if (!any) return;
-    try self.nvim.client.flush();
+    try self.nvim_session.client.flush();
     try self.draw();
 }
 
@@ -245,8 +242,8 @@ fn handleResize(self: *Daemon, pane: *Pane) !void {
     try self.sizeWindow(pane);
     // whatever Rex gave, asked for or not: the floats fit it
     if (pane.layer != null) try self.refit(pane);
-    if (pane == self.focusedPane()) try self.nvim.fitUiTo(pane);
-    try self.nvim.client.flush();
+    if (pane == self.focusedPane()) try self.nvim_session.fitUiTo(pane);
+    try self.nvim_session.client.flush();
     try self.draw();
 }
 
@@ -264,14 +261,14 @@ fn onInput(self: *Daemon, pane: *Pane) !void {
 
     // a floating pane's default grid is set as it draws
     if (pane.layer == null) surface.forwarder.grid = self.gridOfPane(pane) orelse 0;
-    _ = try surface.forwarder.feed(self.nvim.client, bytes);
+    _ = try surface.forwarder.feed(self.nvim_session.client, bytes);
 }
 
 /// Typed into a pane Rex hasn't focused, as `rex send` can. Focus reports
 /// don't count: Rex sends them as it moves focus away.
 fn typedIntoUnfocusedPane(self: *const Daemon, pane: *const Pane, bytes: []const u8) bool {
     const win = pane.neovim_window_handle orelse return false;
-    return win != self.nvim.current_win and
+    return win != self.nvim_session.current_win and
         !self.rex_session.hasFocused(pane.rex_block) and
         !input.onlyFocusReports(bytes);
 }
@@ -326,8 +323,8 @@ fn paneGone(self: *Daemon, p: *Pane) !void {
     if (p.layer) |l| {
         // closed in Rex: close its floats, which the plugin notices
         self.panes.remove(self.gpa, self.io, self.loop, i);
-        for (l.group.topGrids()) |top| if (self.grids.winOn(top)) |w| try windows.close(self.nvim.client, w.win);
-        try self.nvim.client.flush();
+        for (l.group.topGrids()) |top| if (self.grids.winOn(top)) |w| try nvim.windows.close(self.nvim_session.client, w.win);
+        try self.nvim_session.client.flush();
         return;
     }
     if (!self.otherTiledPanes(p.id)) {
@@ -338,8 +335,8 @@ fn paneGone(self: *Daemon, p: *Pane) !void {
     self.panes.remove(self.gpa, self.io, self.loop, i);
     const win = maybe_win orelse return;
     try self.changes.markClosing(self.gpa, win);
-    try windows.close(self.nvim.client, win);
-    try self.nvim.client.flush();
+    try nvim.windows.close(self.nvim_session.client, win);
+    try self.nvim_session.client.flush();
 }
 
 /// Another pane than `id` shows, or will show, an ordinary window.
@@ -353,8 +350,8 @@ fn otherTiledPanes(self: *const Daemon, id: u32) bool {
 // Neovim
 
 fn onNvim(self: *Daemon) !void {
-    if (!try self.nvim.client.read(self.gpa)) return self.stop(.nvim_exited);
-    while (try self.nvim.client.next()) |msg| switch (msg) {
+    if (!try self.nvim_session.client.read(self.gpa)) return self.stop(.nvim_exited);
+    while (try self.nvim_session.client.next()) |msg| switch (msg) {
         .notification => |n| {
             var params = n.params;
             if (std.mem.eql(u8, n.method, "redraw")) {
@@ -362,9 +359,9 @@ fn onNvim(self: *Daemon) !void {
                     try self.reconcile();
                     try self.draw();
                 }
-            } else if (std.mem.eql(u8, n.method, Options.method)) {
+            } else if (std.mem.eql(u8, n.method, nvim.Options.method)) {
                 try self.onOptions(&params);
-            } else if (try windows.parseNote(n.method, &params)) |note| switch (note) {
+            } else if (try nvim.windows.parseNote(n.method, &params)) |note| switch (note) {
                 .current => |win| try self.onCurrent(win),
                 .float => |win| try self.onCurrentFloat(win),
                 .entered => |win| try self.onEnteredFloat(win),
@@ -376,10 +373,10 @@ fn onNvim(self: *Daemon) !void {
                 .cmdheight => |rows| try self.onCmdheight(rows),
             };
         },
-        .request => |r| try self.nvim.client.respondError(r.id, "neorex serves no requests"),
+        .request => |r| try self.nvim_session.client.respondError(r.id, "neorex serves no requests"),
         .response => |r| {
             var result = r.result;
-            if (r.id == self.nvim.current_win_req) self.nvim.current_win_req = null;
+            if (r.id == self.nvim_session.current_win_req) self.nvim_session.current_win_req = null;
             var show_now = false;
             for (self.panes.list.items) |*p| if (p.layer) |*l| if (l.fit == r.id) {
                 // the refit redraws before it answers (`place_group`), so
@@ -391,14 +388,14 @@ fn onNvim(self: *Daemon) !void {
             if (show_now) try self.draw();
             if (r.err) |e| {
                 std.debug.print("neovim error: {s}\n", .{e});
-            } else if (r.id == self.nvim.channel_req) {
-                const size = sizing.windowSize(self.panes.byId(startup_pane_id).?, self.nvim.cmd_rows);
-                self.nvim.setup_req = try windows.setup(self.nvim.client, try windows.parseChannel(&result), size[0], size[1]);
-                try self.nvim.client.flush();
-            } else if (r.id == self.nvim.setup_req) {
-                const wins = try windows.parseSetup(&result);
+            } else if (r.id == self.nvim_session.channel_req) {
+                const size = sizing.windowSize(self.panes.byId(startup_pane_id).?, self.nvim_session.cmd_rows);
+                self.nvim_session.setup_req = try nvim.windows.setup(self.nvim_session.client, try nvim.windows.parseChannel(&result), size[0], size[1]);
+                try self.nvim_session.client.flush();
+            } else if (r.id == self.nvim_session.setup_req) {
+                const wins = try nvim.windows.parseSetup(&result);
                 if (self.panes.byId(startup_pane_id)) |launch| launch.neovim_window_handle = wins[0];
-                self.nvim.ready = true;
+                self.nvim_session.ready = true;
                 try self.reconcile();
                 try self.draw();
             }
@@ -411,51 +408,51 @@ fn onNvim(self: *Daemon) !void {
 fn onOptions(self: *Daemon, params: *msgpack.Decoder) !void {
     var buf: [1024]u8 = undefined;
     var problems: std.Io.Writer = .fixed(&buf);
-    const new = try Options.decode(params, &problems);
-    if (problems.end > 0) try warn(self.nvim.client, problems.buffered());
-    var effects: [Options.max_effects]Options.Effect = undefined;
-    for (Options.diff(self.options, new, &effects)) |e| switch (e) {
-        .vim_ui => |v| try setVimUi(self.nvim.client, @tagName(v.func), v.surface == .rex),
+    const new = try nvim.Options.decode(params, &problems);
+    if (problems.end > 0) try warn(self.nvim_session.client, problems.buffered());
+    var effects: [nvim.Options.max_effects]nvim.Options.Effect = undefined;
+    for (nvim.Options.diff(self.options, new, &effects)) |e| switch (e) {
+        .vim_ui => |v| try setVimUi(self.nvim_session.client, @tagName(v.func), v.surface == .rex),
         // each comes with the feature it turns on
         .ui_option, .palette => {},
     };
     self.options = new;
-    try self.nvim.client.flush();
+    try self.nvim_session.client.flush();
 }
 
 /// Hands `vim.ui.<func>` to Rex's palette, or gives back what it replaced.
 /// Without neorex's runtime on 'runtimepath' there's nothing to hand it to.
-fn setVimUi(nvim: *Nvim, func: []const u8, to_rex: bool) !void {
-    _ = try nvim.execLua(
+fn setVimUi(nvim_client: *nvim.Nvim, func: []const u8, to_rex: bool) !void {
+    _ = try nvim_client.execLua(
         \\local ok, ui = pcall(require, 'neorex.ui')
         \\if ok then ui.set(...) end
     , 2);
-    try msgpack.writeStr(nvim.writer(), func);
-    try msgpack.writeBool(nvim.writer(), to_rex);
+    try msgpack.writeStr(nvim_client.writer(), func);
+    try msgpack.writeBool(nvim_client.writer(), to_rex);
 }
 
 /// Shows `lines`, one problem each, as a warning in Neovim.
-fn warn(nvim: *Nvim, lines: []const u8) !void {
-    _ = try nvim.execLua(
+fn warn(nvim_client: *nvim.Nvim, lines: []const u8) !void {
+    _ = try nvim_client.execLua(
         \\local text = ...
         \\local out = {}
         \\for line in text:gmatch('[^\n]+') do out[#out + 1] = 'neorex: ' .. line end
         \\vim.notify(table.concat(out, '\n'), vim.log.levels.WARN)
     , 1);
-    try msgpack.writeStr(nvim.writer(), lines);
+    try msgpack.writeStr(nvim_client.writer(), lines);
 }
 
 /// Neovim resized a window and put it back: move its pane's borders in Rex
 /// instead, one `resize_pane` for each way it changed. The new size comes
 /// back like any other, as Rex resizing the pane.
-fn onResize(self: *Daemon, rz: windows.Resize) !void {
+fn onResize(self: *Daemon, rz: nvim.windows.Resize) !void {
     const p = self.panes.byWin(rz.win) orelse return;
     if (p.layer != null) return;
     const block = p.rex_block orelse return;
     // zoomed, the pane fills the window whatever its borders say
     if (self.rex_layout.zoomed_block != null) return;
     // the editor spans the Rex window, so its size is the window's
-    const window = self.nvim.editor_size;
+    const window = self.nvim_session.editor_size;
     for ([_]rex.LayoutTree.Direction{ .horizontal, .vertical }, [_]i32{ rz.cols, rz.rows }, 0..) |dir, delta, axis| {
         const b = self.rex_layout.border(&block, dir) orelse continue;
         const n = self.rex_layout.node(b.split);
@@ -475,27 +472,27 @@ fn onResize(self: *Daemon, rz: windows.Resize) !void {
 /// 'cmdheight' changed: give each window the rows its pane no longer keeps
 /// for the command line, or take them back.
 fn onCmdheight(self: *Daemon, rows: u32) !void {
-    if (rows == self.nvim.cmd_rows) return;
-    self.nvim.cmd_rows = rows;
+    if (rows == self.nvim_session.cmd_rows) return;
+    self.nvim_session.cmd_rows = rows;
     for (self.panes.list.items) |*p| try self.sizeWindow(p);
-    try self.nvim.client.flush();
+    try self.nvim_session.client.flush();
 }
 
 /// Neovim's current window changed: focus its pane in Rex.
 fn onCurrent(self: *Daemon, win: i64) !void {
     // sent before our own change ran; the report after it is coming
-    if (self.nvim.current_win_req != null) return;
-    self.nvim.current_float = 0;
-    self.nvim.current_win = win;
+    if (self.nvim_session.current_win_req != null) return;
+    self.nvim_session.current_float = 0;
+    self.nvim_session.current_win = win;
     const p = self.panes.byWin(win) orelse return;
-    try self.nvim.fitUiTo(p);
+    try self.nvim_session.fitUiTo(p);
     try self.draw();
     try self.rex_session.focus(p.rex_block);
 }
 
 /// A float became current: if it's in a floating pane, focus that.
 fn onCurrentFloat(self: *Daemon, win: i64) !void {
-    self.nvim.current_float = win;
+    self.nvim_session.current_float = win;
     const p = self.layerOfWin(win) orelse return;
     try self.rex_session.focus(p.rex_block);
 }
@@ -503,17 +500,17 @@ fn onCurrentFloat(self: *Daemon, win: i64) !void {
 /// A float took focus. Usually before it's drawn, so the next flush gives
 /// its group a floating pane; if it's already showing in a pane, now.
 fn onEnteredFloat(self: *Daemon, win: i64) !void {
-    self.nvim.noteEntered(win);
-    if (!self.nvim.ready or self.grids.gridOf(win) == null or self.layerOfWin(win) != null) return;
+    self.nvim_session.noteEntered(win);
+    if (!self.nvim_session.ready or self.grids.gridOf(win) == null or self.layerOfWin(win) != null) return;
     try self.reconcileLayers();
-    try self.nvim.client.flush();
+    try self.nvim_session.client.flush();
     try self.draw();
 }
 
 /// Matches panes to windows: new external windows get panes, ordinary ones
 /// are made external, and panes whose windows closed hang up.
 fn reconcile(self: *Daemon) !void {
-    if (!self.nvim.ready) return;
+    if (!self.nvim_session.ready) return;
     var i = self.panes.list.items.len;
     while (i > 0) {
         i -= 1;
@@ -542,8 +539,8 @@ fn reconcile(self: *Daemon) !void {
     for (self.grids.wins.values()) |w| switch (w.kind) {
         .ordinary => {
             if (!try self.changes.shouldAdopt(self.gpa, w.win)) continue;
-            const size = if (self.panes.byWin(w.win)) |p| sizing.windowSize(p, self.nvim.cmd_rows) else self.newWindowSize(w.win);
-            try windows.adopt(self.nvim.client, w.win, size[0], size[1]);
+            const size = if (self.panes.byWin(w.win)) |p| sizing.windowSize(p, self.nvim_session.cmd_rows) else self.newWindowSize(w.win);
+            try nvim.windows.adopt(self.nvim_session.client, w.win, size[0], size[1]);
         },
         .external => {
             self.changes.becameExternal(w.win);
@@ -558,7 +555,7 @@ fn reconcile(self: *Daemon) !void {
     };
     for (self.panes.list.items) |*p| try self.sizeWindow(p);
     try self.reconcileLayers();
-    try self.nvim.client.flush();
+    try self.nvim_session.client.flush();
 }
 
 /// A pane kept for a reopened window.
@@ -573,18 +570,18 @@ fn newWindowSize(self: *const Daemon, win: i64) [2]u32 {
     const sp = self.changes.splitOf(win);
     if (self.fixedPlace(sp)) |fx| {
         const size = sizing.fixedPaneSize(fx.fit, sp.side_by_side);
-        return .{ size[0], @max(size[1] -| self.nvim.cmd_rows, 1) };
+        return .{ size[0], @max(size[1] -| self.nvim_session.cmd_rows, 1) };
     }
-    return sizing.newWindowSize(self.splitFrom(sp), sp.side_by_side, self.nvim.cmd_rows);
+    return sizing.newWindowSize(self.splitFrom(sp), sp.side_by_side, self.nvim_session.cmd_rows);
 }
 
 /// Where fixed-size window `sp` opens: beside the smallest part of Rex's layout that
 /// holds all our tiled panes, like Neovim's :topleft at the editor's edge.
 /// Null for an ordinary split, or before Rex has shown us a layout or the
 /// editor's size.
-fn fixedPlace(self: *const Daemon, sp: windows.Split) ?struct { anchor: [42]u8, fit: sizing.Fixed } {
+fn fixedPlace(self: *const Daemon, sp: nvim.windows.Split) ?struct { anchor: [42]u8, fit: sizing.Fixed } {
     if (sp.fixed_cells == 0) return null;
-    const window = self.nvim.editor_size;
+    const window = self.nvim_session.editor_size;
     if (window[0] == 0 or window[1] == 0) return null;
     const edge = self.rex_layout.edgeAround(OurTiledBlocks{ .panes = &self.panes }) orelse return null;
     const id = self.rex_layout.idOf(edge) orelse return null;
@@ -592,7 +589,7 @@ fn fixedPlace(self: *const Daemon, sp: windows.Split) ?struct { anchor: [42]u8, 
     return .{
         .anchor = id[0..42].*,
         // the editor spans the Rex window, so its size is the window's
-        .fit = sizing.fixed(window, self.rex_layout.node(edge).rect, sp.fixed_cells, sp.side_by_side, self.nvim.cmd_rows),
+        .fit = sizing.fixed(window, self.rex_layout.node(edge).rect, sp.fixed_cells, sp.side_by_side, self.nvim_session.cmd_rows),
     };
 }
 
@@ -606,7 +603,7 @@ const OurTiledBlocks = struct {
 };
 
 /// The pane a new window splits: its origin's, else the focused one.
-fn splitFrom(self: *const Daemon, sp: windows.Split) ?*Pane {
+fn splitFrom(self: *const Daemon, sp: nvim.windows.Split) ?*Pane {
     if (sp.from != 0) if (self.panes.byWin(sp.from)) |p| return p;
     return self.focusedPane();
 }
@@ -639,7 +636,7 @@ fn onSplitMade(self: *Daemon, pane_id: u32, block: []const u8) !void {
         break :blk null;
     };
     try self.rex_session.disown(block);
-    if (p.neovim_window_handle == self.nvim.current_win) try self.rex_session.focus(p.rex_block);
+    if (p.neovim_window_handle == self.nvim_session.current_win) try self.rex_session.focus(p.rex_block);
 }
 
 /// Rex made the floating pane's layer: link it, and focus it if its float is current.
@@ -657,7 +654,7 @@ fn onLayerMade(self: *Daemon, pane_id: u32, block: []const u8, layer: ?[]const u
     const l = &p.layer.?;
     if (layer) |id| l.id = Pane.rexLayer(id) catch null;
     l.bounds_asked -|= 1;
-    if (self.nvim.current_float != 0 and self.layerOfWin(self.nvim.current_float) == p) try self.rex_session.focus(p.rex_block);
+    if (self.nvim_session.current_float != 0 and self.layerOfWin(self.nvim_session.current_float) == p) try self.rex_session.focus(p.rex_block);
 }
 
 /// The user focused one of our panes in Rex: make its window current.
@@ -665,27 +662,27 @@ fn onRexFocus(self: *Daemon, block: []const u8) !void {
     const p = self.panes.byBlock(block) orelse return;
     if (p.layer) |*l| {
         // clicked into a floating pane: into one of its floats, if not there
-        if (self.nvim.current_float != 0 and self.layerOfWin(self.nvim.current_float) == p) return;
+        if (self.nvim_session.current_float != 0 and self.layerOfWin(self.nvim_session.current_float) == p) return;
         const win = self.focusableIn(&l.group) orelse return;
-        self.nvim.current_float = win;
-        _ = try windows.setCurrent(self.nvim.client, win);
-        try self.nvim.client.flush();
+        self.nvim_session.current_float = win;
+        _ = try nvim.windows.setCurrent(self.nvim_session.client, win);
+        try self.nvim_session.client.flush();
         return;
     }
     const win = p.neovim_window_handle orelse return;
     // back from a float to the window under it counts as a move
-    if (win == self.nvim.current_win and self.nvim.current_float == 0) return;
-    self.nvim.current_float = 0;
+    if (win == self.nvim_session.current_win and self.nvim_session.current_float == 0) return;
+    self.nvim_session.current_float = 0;
     try self.makeCurrent(p);
-    try self.nvim.client.flush();
+    try self.nvim_session.client.flush();
     try self.draw();
 }
 
 /// A newer view: where our panes sit, so the editor and floats fit.
 fn onLayout(self: *Daemon, wins: []const std.json.Value) !void {
     try self.readLayout(wins);
-    if (self.focusedPane()) |f| try self.nvim.fitUiTo(f);
-    try self.nvim.client.flush();
+    if (self.focusedPane()) |f| try self.nvim_session.fitUiTo(f);
+    try self.nvim_session.client.flush();
     try self.draw();
 }
 
@@ -729,7 +726,7 @@ fn onLayerBounds(self: *Daemon, block: []const u8, bounds: rex.layout.Rect) void
 /// grant it (`onFloatsMoved`), and either way they fit what Rex gives.
 fn reconcileLayers(self: *Daemon) !void {
     var buf: [screen.FloatGroups.max_groups]screen.FloatGroups.Group = undefined;
-    const groups = if (self.rex_session.conn != .closed) screen.FloatGroups.find(&self.grids, self.nvim.enteredFloats(), &buf) else buf[0..0];
+    const groups = if (self.rex_session.conn != .closed) screen.FloatGroups.find(&self.grids, self.nvim_session.enteredFloats(), &buf) else buf[0..0];
     var i = self.panes.list.items.len;
     while (i > 0) {
         i -= 1;
@@ -887,7 +884,7 @@ fn followLayer(self: *Daemon, p: *Pane) !?u32 {
         n += 1;
     };
     if (n == 0) return null;
-    return try windows.placeGroup(self.nvim.client, wins[0..n], row, col, w, h);
+    return try nvim.windows.placeGroup(self.nvim_session.client, wins[0..n], row, col, w, h);
 }
 
 /// The floating pane showing float `win`, if one does.
@@ -964,8 +961,8 @@ fn draw(self: *Daemon) !void {
 }
 
 /// Mouse events on the floats drawn go to their grids.
-fn setTargets(f: *Forwarder, rects: []const screen.PaneView.Rect) void {
-    var buf: [Forwarder.max_targets]Forwarder.Target = undefined;
+fn setTargets(f: *nvim.Forwarder, rects: []const screen.PaneView.Rect) void {
+    var buf: [nvim.Forwarder.max_targets]nvim.Forwarder.Target = undefined;
     const n = @min(rects.len, buf.len);
     for (rects[0..n], buf[0..n]) |r, *t| t.* = .{ .grid = r.grid, .row = r.row, .col = r.col, .width = r.width, .height = r.height };
     f.setTargets(buf[0..n]);
@@ -987,25 +984,25 @@ fn sizeWindow(self: *Daemon, p: *Pane) !void {
     if (p.awaiting_layout) return;
     const win = p.neovim_window_handle orelse return;
     const grid = self.grids.gridOf(win) orelse return;
-    const size = s.windowSize(self.nvim.cmd_rows);
+    const size = s.windowSize(self.nvim_session.cmd_rows);
     const last = p.last_asked_win_size;
     if (last.grid == grid and last.cols == size[0] and last.rows == size[1]) return;
     p.last_asked_win_size = .{ .grid = grid, .cols = size[0], .rows = size[1] };
-    try windows.size(self.nvim.client, win, size[0], size[1]);
+    try nvim.windows.size(self.nvim_session.client, win, size[0], size[1]);
 }
 
 /// Makes the pane's window Neovim's current one, sized to the pane.
 fn makeCurrent(self: *Daemon, pane: *Pane) !void {
     const win = pane.neovim_window_handle.?;
-    self.nvim.current_win = win;
-    self.nvim.current_win_req = try windows.setCurrent(self.nvim.client, win);
-    try self.nvim.fitUiTo(pane);
+    self.nvim_session.current_win = win;
+    self.nvim_session.current_win_req = try nvim.windows.setCurrent(self.nvim_session.client, win);
+    try self.nvim_session.fitUiTo(pane);
 }
 
 /// The pane showing Neovim's current window; before setup, the launcher's.
 fn focusedPane(self: *const Daemon) ?*Pane {
-    if (self.nvim.current_win == 0) return self.panes.byId(startup_pane_id);
-    return self.panes.byWin(self.nvim.current_win);
+    if (self.nvim_session.current_win == 0) return self.panes.byId(startup_pane_id);
+    return self.panes.byWin(self.nvim_session.current_win);
 }
 
 /// The grid showing the pane's window, if it has one yet.

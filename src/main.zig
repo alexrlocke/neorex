@@ -62,14 +62,7 @@ fn eql(a: []const u8, b: []const u8) bool {
 
 test {
     // every file, reached from here; golden.zig is its own test module
-    _ = @import("nvim/Framer.zig");
-    _ = @import("nvim/rpc.zig");
-    _ = @import("nvim/Nvim.zig");
-    _ = @import("nvim/Forwarder.zig");
-    _ = @import("nvim/windows.zig");
-    _ = @import("nvim/Options.zig");
     _ = @import("lua_spec.zig");
-    _ = @import("nvim/runtime.zig");
     _ = @import("daemon/loop.zig");
     _ = @import("daemon/fdpass.zig");
     _ = @import("daemon/pane_helper.zig");

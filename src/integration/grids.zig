@@ -2,20 +2,20 @@
 
 const std = @import("std");
 const testing = std.testing;
-const Nvim = @import("../nvim/Nvim.zig");
 const Grids = @import("screen").Grids;
 const Grid = @import("screen").Grid;
+const nvim = @import("nvim");
 
 const msgpack = @import("msgpack");
 
 /// Applies Neovim's redraws until `done` holds after a flush.
-fn pumpUntil(nvim: anytype, gs: *Grids, comptime done: fn (*Grids) bool) !void {
+fn pumpUntil(nvim_client: anytype, gs: *Grids, comptime done: fn (*Grids) bool) !void {
     const gpa = testing.allocator;
     for (0..100) |_| {
-        var fds = [_]std.c.pollfd{.{ .fd = nvim.readFd(), .events = std.c.POLL.IN, .revents = 0 }};
+        var fds = [_]std.c.pollfd{.{ .fd = nvim_client.readFd(), .events = std.c.POLL.IN, .revents = 0 }};
         if (std.c.poll(&fds, 1, 2000) <= 0) return error.TestTimedOut;
-        if (!try nvim.read(gpa)) return error.NvimExited;
-        while (try nvim.next()) |msg| switch (msg) {
+        if (!try nvim_client.read(gpa)) return error.NvimExited;
+        while (try nvim_client.next()) |msg| switch (msg) {
             .notification => |n| if (std.mem.eql(u8, n.method, "redraw")) {
                 var params = n.params;
                 if (try gs.applyRedraw(gpa, &params) and done(gs)) return;
@@ -33,19 +33,19 @@ fn pumpUntil(nvim: anytype, gs: *Grids, comptime done: fn (*Grids) bool) !void {
 test "neovim draws windows into their own grids" {
     const gpa = testing.allocator;
     var buf: [512]u8 = undefined;
-    var nvim = Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n" }, &buf) catch |err| switch (err) {
+    var nvim_client = nvim.Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n" }, &buf) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,
         else => return err,
     };
-    defer nvim.deinit(gpa);
-    try nvim.uiAttach(20, 6, .{ .ext_multigrid = true });
-    _ = try nvim.request("nvim_input", 1);
-    try msgpack.writeStr(nvim.writer(), "ihello<Esc>");
-    try nvim.flush();
+    defer nvim_client.deinit(gpa);
+    try nvim_client.uiAttach(20, 6, .{ .ext_multigrid = true });
+    _ = try nvim_client.request("nvim_input", 1);
+    try msgpack.writeStr(nvim_client.writer(), "ihello<Esc>");
+    try nvim_client.flush();
 
     var gs: Grids = .{};
     defer gs.deinit(gpa);
-    try pumpUntil(&nvim, &gs, struct {
+    try pumpUntil(&nvim_client, &gs, struct {
         fn f(g: *Grids) bool {
             const id = g.gridOf(1000) orelse return false;
             var b: [32]u8 = undefined;
@@ -59,12 +59,12 @@ test "neovim draws windows into their own grids" {
     try testing.expectEqual(@as(u32, 4), gs.get(first).?.cursor_col);
 
     // a split gets another grid; the first window, made external, keeps its own
-    _ = try nvim.execLua(
+    _ = try nvim_client.execLua(
         \\vim.cmd.split()
         \\vim.api.nvim_win_set_config(1000, { external = true, width = 12, height = 3 })
     , 0);
-    try nvim.flush();
-    try pumpUntil(&nvim, &gs, struct {
+    try nvim_client.flush();
+    try pumpUntil(&nvim_client, &gs, struct {
         fn f(g: *Grids) bool {
             const id = g.gridOf(1000) orelse return false;
             var b: [32]u8 = undefined;

@@ -7,7 +7,7 @@ const Grid = @import("screen").Grid;
 const Grids = @import("screen").Grids;
 const Style = @import("screen").Style;
 const render = @import("screen").render;
-const Nvim = @import("nvim/Nvim.zig");
+const nvim = @import("nvim");
 
 const msgpack = @import("msgpack");
 
@@ -344,12 +344,12 @@ test "live neovim session" {
     const cols = 40;
     const rows = 12;
     var buf: [256]u8 = undefined;
-    var nvim = Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n" }, &buf) catch |err| switch (err) {
+    var nvim_client = nvim.Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n" }, &buf) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,
         else => return err,
     };
-    defer nvim.deinit(gpa);
-    try nvim.uiAttach(cols, rows, .{});
+    defer nvim_client.deinit(gpa);
+    try nvim_client.uiAttach(cols, rows, .{});
 
     var t = try testTerminal(cols, rows);
     defer t.deinit(gpa);
@@ -357,12 +357,12 @@ test "live neovim session" {
     defer gs.deinit(gpa);
 
     var stats: Stats = .{};
-    try settle(&nvim, &t, &gs, &stats);
+    try settle(&nvim_client, &t, &gs, &stats);
     for (steps) |keys| {
-        _ = try nvim.request("nvim_input", 1);
-        try msgpack.writeStr(nvim.writer(), keys);
-        try nvim.flush();
-        settle(&nvim, &t, &gs, &stats) catch |err| {
+        _ = try nvim_client.request("nvim_input", 1);
+        try msgpack.writeStr(nvim_client.writer(), keys);
+        try nvim_client.flush();
+        settle(&nvim_client, &t, &gs, &stats) catch |err| {
             std.debug.print("golden: after step {s}\n", .{keys});
             return err;
         };
@@ -377,12 +377,12 @@ test "live neovim session" {
 const Stats = struct { frames: usize = 0, scrolls: usize = 0, bar_cursor: usize = 0 };
 
 /// Applies redraws until Neovim goes quiet, checking every frame.
-fn settle(nvim: *Nvim, t: *vt.Terminal, gs: *Grids, stats: *Stats) !void {
+fn settle(nvim_client: *nvim.Nvim, t: *vt.Terminal, gs: *Grids, stats: *Stats) !void {
     while (true) {
-        var fds = [_]std.c.pollfd{.{ .fd = nvim.readFd(), .events = std.c.POLL.IN, .revents = 0 }};
+        var fds = [_]std.c.pollfd{.{ .fd = nvim_client.readFd(), .events = std.c.POLL.IN, .revents = 0 }};
         if (std.c.poll(&fds, 1, 150) <= 0) return;
-        if (!try nvim.read(gpa)) return error.NvimExited;
-        while (try nvim.next()) |msg| switch (msg) {
+        if (!try nvim_client.read(gpa)) return error.NvimExited;
+        while (try nvim_client.next()) |msg| switch (msg) {
             .notification => |n| if (std.mem.eql(u8, n.method, "redraw")) {
                 var params = n.params;
                 if (try gs.applyRedraw(gpa, &params)) {
@@ -394,13 +394,12 @@ fn settle(nvim: *Nvim, t: *vt.Terminal, gs: *Grids, stats: *Stats) !void {
                 }
             },
             .response => |r| if (r.err != null) return error.NvimError,
-            .request => |r| try nvim.respondError(r.id, "golden test"),
+            .request => |r| try nvim_client.respondError(r.id, "golden test"),
         };
     }
 }
 
 const PaneView = @import("screen").PaneView;
-const windows = @import("nvim/windows.zig");
 
 /// A pane for the multigrid test: what it shows and Ghostty's screen of it.
 const TestPane = struct {
@@ -411,7 +410,7 @@ const TestPane = struct {
 
 /// Neovim with windows.lua, two panes, and the daemon's part played here.
 const Multi = struct {
-    nvim: Nvim,
+    nvim_client: nvim.Nvim,
     gs: Grids = .{},
     panes: [2]TestPane,
     current: i64 = 0,
@@ -423,27 +422,27 @@ const Multi = struct {
     fn deinit(m: *Multi) void {
         for (&m.panes) |*p| p.t.deinit(gpa);
         m.gs.deinit(gpa);
-        m.nvim.deinit(gpa);
+        m.nvim_client.deinit(gpa);
     }
 
     fn input(m: *Multi, keys: []const u8) !void {
-        _ = try m.nvim.request("nvim_input", 1);
-        try msgpack.writeStr(m.nvim.writer(), keys);
-        try m.nvim.flush();
+        _ = try m.nvim_client.request("nvim_input", 1);
+        try msgpack.writeStr(m.nvim_client.writer(), keys);
+        try m.nvim_client.flush();
     }
 
     /// Applies messages until Neovim goes quiet, checking every frame.
     fn settle(m: *Multi) !void {
         while (true) {
-            var fds = [_]std.c.pollfd{.{ .fd = m.nvim.readFd(), .events = std.c.POLL.IN, .revents = 0 }};
+            var fds = [_]std.c.pollfd{.{ .fd = m.nvim_client.readFd(), .events = std.c.POLL.IN, .revents = 0 }};
             if (std.c.poll(&fds, 1, 200) <= 0) return;
-            if (!try m.nvim.read(gpa)) return error.NvimExited;
-            while (try m.nvim.next()) |msg| switch (msg) {
+            if (!try m.nvim_client.read(gpa)) return error.NvimExited;
+            while (try m.nvim_client.next()) |msg| switch (msg) {
                 .notification => |n| {
                     var params = n.params;
                     if (std.mem.eql(u8, n.method, "redraw")) {
                         if (try m.gs.applyRedraw(gpa, &params)) try m.flushed();
-                    } else if (try windows.parseNote(n.method, &params)) |note| switch (note) {
+                    } else if (try nvim.windows.parseNote(n.method, &params)) |note| switch (note) {
                         .current => |w| m.current = w,
                         .reopen, .split, .fixed, .resize, .float, .entered, .title, .cmdheight => {},
                     };
@@ -456,15 +455,15 @@ const Multi = struct {
                     var result = r.result;
                     if (r.id == m.chan_req) {
                         const v = m.panes[0].view;
-                        m.setup_req = try windows.setup(&m.nvim, try windows.parseChannel(&result), v.cols, v.rows - 1);
-                        try m.nvim.flush();
+                        m.setup_req = try nvim.windows.setup(&m.nvim_client, try nvim.windows.parseChannel(&result), v.cols, v.rows - 1);
+                        try m.nvim_client.flush();
                     } else if (r.id == m.setup_req) {
-                        const wins = try windows.parseSetup(&result);
+                        const wins = try nvim.windows.parseSetup(&result);
                         m.panes[0].win = wins[0];
                         m.anchor = wins[1];
                     }
                 },
-                .request => |r| try m.nvim.respondError(r.id, "golden test"),
+                .request => |r| try m.nvim_client.respondError(r.id, "golden test"),
             };
         }
     }
@@ -475,8 +474,8 @@ const Multi = struct {
         if (m.anchor == 0) return;
         for (m.gs.wins.values()) |w| if (w.kind == .ordinary and w.win != m.anchor and m.panes[1].win == 0) {
             const v = m.panes[1].view;
-            try windows.adopt(&m.nvim, w.win, v.cols, v.rows - 1);
-            try m.nvim.flush();
+            try nvim.windows.adopt(&m.nvim_client, w.win, v.cols, v.rows - 1);
+            try m.nvim_client.flush();
             m.panes[1].win = w.win;
         };
         for (&m.panes, 0..) |*p, i| try m.check(p, i);
@@ -614,7 +613,7 @@ const multi_steps = [_][]const u8{
 test "live neovim with a pane per window" {
     var buf: [1024]u8 = undefined;
     var m: Multi = .{
-        .nvim = Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n" }, &buf) catch |err| switch (err) {
+        .nvim_client = nvim.Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n" }, &buf) catch |err| switch (err) {
             error.FileNotFound => return error.SkipZigTest,
             else => return err,
         },
@@ -624,9 +623,9 @@ test "live neovim with a pane per window" {
         },
     };
     defer m.deinit();
-    try m.nvim.uiAttach(30, 8, .{ .ext_multigrid = true });
-    m.chan_req = try windows.askChannel(&m.nvim);
-    try m.nvim.flush();
+    try m.nvim_client.uiAttach(30, 8, .{ .ext_multigrid = true });
+    m.chan_req = try nvim.windows.askChannel(&m.nvim_client);
+    try m.nvim_client.flush();
     try m.settle();
     for (multi_steps) |keys| {
         try m.input(keys);
