@@ -73,6 +73,7 @@ test {
     _ = @import("daemon/Titles.zig");
     _ = @import("daemon/Surface.zig");
     _ = @import("daemon/sizing.zig");
+    _ = @import("daemon/policy.zig");
     _ = @import("daemon/Daemon.zig");
     _ = launch;
     _ = serve;

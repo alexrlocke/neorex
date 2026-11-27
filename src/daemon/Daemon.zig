@@ -2,7 +2,8 @@
 //! window and a floating pane per group of editor floats that took focus or
 //! can't (see FloatGroups). After
 //! each Neovim flush, `reconcile` gives new windows and float groups panes
-//! and hangs up panes whose windows closed; then every pane is drawn.
+//! and hangs up panes whose windows closed; then every pane is drawn. The
+//! decisions that need no I/O are in policy.zig, tested there; this does them.
 // TODO: Needs a pretty major rewrite
 
 const std = @import("std");
@@ -17,6 +18,7 @@ const Titles = @import("Titles.zig");
 const Surface = @import("Surface.zig");
 const pane_helper = @import("pane_helper.zig");
 const sizing = @import("sizing.zig");
+const policy = @import("policy.zig");
 
 const rex = @import("rex");
 const input = @import("term").input;
@@ -154,14 +156,11 @@ fn afterBatch(self: *Daemon) !void {
 }
 
 fn sendFocus(self: *Daemon, waited: bool) !void {
-    var known = false;
-    var any = false;
-    for (self.panes.list.items) |p| if (p.terminal_surface) |s| if (s.forwarder.focused) |f| {
-        known = true;
-        any = any or f;
+    const any = switch (policy.focus(&self.panes, self.nvim_session.ui_focused, waited)) {
+        .none => return,
+        .wait => return self.addTimer(.focus_timer, focus_out_delay_ms),
+        .tell => |f| f,
     };
-    if (!known or any == self.nvim_session.ui_focused) return;
-    if (!any and !waited) return self.addTimer(.focus_timer, focus_out_delay_ms);
     self.nvim_session.ui_focused = any;
     _ = try self.nvim_session.client.request("nvim_ui_set_focus", 1);
     try msgpack.writeBool(self.nvim_session.client.writer(), any);
@@ -507,61 +506,31 @@ fn onEnteredFloat(self: *Daemon, win: i64) !void {
     try self.draw();
 }
 
-/// Matches panes to windows: new external windows get panes, ordinary ones
-/// are made external, and panes whose windows closed hang up.
+/// Matches panes to windows, as `policy.reconcile` decides: panes whose
+/// windows closed hang up, ordinary windows are made external, and new
+/// external ones get panes. Then every window is sized to its pane.
 fn reconcile(self: *Daemon) !void {
     if (!self.nvim_session.ready) return;
-    var i = self.panes.list.items.len;
-    while (i > 0) {
-        i -= 1;
-        const p = &self.panes.list.items[i];
-        const win = p.neovim_window_handle orelse continue;
-        if (self.grids.gridOf(win) != null) continue;
-        self.titles.forget(self.gpa, win);
-        if (self.changes.takeReopening(win)) {
-            p.neovim_window_handle = null;
-            continue;
-        }
-        p.closing = .window_closed;
+    var todo = try policy.reconcile(self.gpa, &self.panes, &self.grids, &self.changes);
+    defer todo.deinit(self.gpa);
+    for (todo.gone.items) |win| self.titles.forget(self.gpa, win);
+    for (todo.closed.items) |i| {
         // close the Rex pane ourselves: Rex can keep a pane open after its
         // helper exits (as when neo-tree opens and closes quickly), showing
         // "exited". Before Rex answers there's no block yet, and
         // onSplitMade closes it.
-        if (p.rex_block) |*b| try self.rex_session.closeBlock(b);
+        if (self.panes.list.items[i].rex_block) |*b| try self.rex_session.closeBlock(b);
         self.panes.remove(self.gpa, self.io, self.loop, i);
     }
-    if (self.panes.list.items.len == 0) {
-        self.stop(.pane_gone);
-        return;
+    if (todo.stop) return self.stop(.pane_gone);
+    for (todo.adopt.items) |win| {
+        const size = if (self.panes.byWin(win)) |p| sizing.windowSize(p, self.nvim_session.cmd_rows) else self.newWindowSize(win);
+        try nvim.windows.adopt(self.nvim_session.client, win, size[0], size[1]);
     }
-    self.changes.forgetGone(&self.grids);
-
-    for (self.grids.wins.values()) |w| switch (w.kind) {
-        .ordinary => {
-            if (!try self.changes.shouldAdopt(self.gpa, w.win)) continue;
-            const size = if (self.panes.byWin(w.win)) |p| sizing.windowSize(p, self.nvim_session.cmd_rows) else self.newWindowSize(w.win);
-            try nvim.windows.adopt(self.nvim_session.client, w.win, size[0], size[1]);
-        },
-        .external => {
-            self.changes.becameExternal(w.win);
-            if (self.panes.byWin(w.win) != null or self.changes.isClosing(w.win)) continue;
-            if (self.waitingPane()) |p| {
-                p.neovim_window_handle = w.win;
-            } else {
-                try self.newPane(w.win);
-            }
-        },
-        .float, .hidden => {},
-    };
+    for (todo.new_pane.items) |win| try self.newPane(win);
     for (self.panes.list.items) |*p| try self.sizeWindow(p);
     try self.reconcileLayers();
     try self.nvim_session.client.flush();
-}
-
-/// A pane kept for a reopened window.
-fn waitingPane(self: *const Daemon) ?*Pane {
-    for (self.panes.list.items) |*p| if (p.layer == null and p.neovim_window_handle == null and p.terminal_surface != null) return p;
-    return null;
 }
 
 /// A guess until the new pane says its size: half the pane it splits, or a
