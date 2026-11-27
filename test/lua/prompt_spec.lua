@@ -1,5 +1,5 @@
 -- Tests for runtime/lua/neorex: run with `nvim --headless --clean -l` from
--- the repository's root (src/lua_spec.zig does, in `zig build test`). A
+-- the repository's root (src/integration/lua.zig does, in `zig build test`). A
 -- fake `rex` stands in for Rex: it records its arguments and stdin, and
 -- answers as the test chose.
 vim.opt.rtp:prepend('runtime')

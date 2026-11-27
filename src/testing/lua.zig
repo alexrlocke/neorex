@@ -1,15 +1,15 @@
-//! Runs the Lua tests (test/lua/*_spec.lua) for runtime/lua/neorex in a
-//! headless Neovim. `zig build test` runs from the repository's root, which
-//! the specs need.
+//! Runs a Lua spec (test/lua/*_spec.lua) in a headless Neovim. Paths are from
+//! the repository's root, which the integration tests run from.
 
 const std = @import("std");
 const testing = std.testing;
+const testing_nvim = @import("nvim.zig");
 
-fn runSpec(comptime path: []const u8) !void {
+pub fn runSpec(comptime path: []const u8) !void {
     const result = std.process.run(testing.allocator, testing.io, .{
         .argv = &.{ "nvim", "--headless", "--clean", "-l", path },
     }) catch |err| switch (err) {
-        error.FileNotFound => return error.SkipZigTest,
+        error.FileNotFound => return testing_nvim.notInstalled(),
         else => return err,
     };
     defer testing.allocator.free(result.stdout);
@@ -22,8 +22,4 @@ fn runSpec(comptime path: []const u8) !void {
         std.debug.print("{s}:\n{s}{s}\n", .{ path, result.stdout, result.stderr });
         return error.LuaSpecFailed;
     }
-}
-
-test "runtime/lua/neorex: prompts, vim.ui and pickers" {
-    try runSpec("test/lua/prompt_spec.lua");
 }

@@ -8,35 +8,13 @@ const nvim = @import("nvim");
 
 const msgpack = @import("msgpack");
 
-/// Applies Neovim's redraws until `done` holds after a flush.
-fn pumpUntil(nvim_client: anytype, gs: *Grids, comptime done: fn (*Grids) bool) !void {
-    const gpa = testing.allocator;
-    for (0..100) |_| {
-        var fds = [_]std.c.pollfd{.{ .fd = nvim_client.readFd(), .events = std.c.POLL.IN, .revents = 0 }};
-        if (std.c.poll(&fds, 1, 2000) <= 0) return error.TestTimedOut;
-        if (!try nvim_client.read(gpa)) return error.NvimExited;
-        while (try nvim_client.next()) |msg| switch (msg) {
-            .notification => |n| if (std.mem.eql(u8, n.method, "redraw")) {
-                var params = n.params;
-                if (try gs.applyRedraw(gpa, &params) and done(gs)) return;
-            },
-            .response => |r| if (r.err) |e| {
-                std.debug.print("neovim: {s}\n", .{e});
-                return error.NvimError;
-            },
-            else => {},
-        };
-    }
-    return error.TestTimedOut;
-}
+const pumpUntil = @import("../testing/redraws.zig").pumpUntil;
+const testing_nvim = @import("../testing/nvim.zig");
 
 test "neovim draws windows into their own grids" {
     const gpa = testing.allocator;
     var buf: [512]u8 = undefined;
-    var nvim_client = nvim.Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n" }, &buf) catch |err| switch (err) {
-        error.FileNotFound => return error.SkipZigTest,
-        else => return err,
-    };
+    var nvim_client = try testing_nvim.spawn(&buf);
     defer nvim_client.deinit(gpa);
     try nvim_client.uiAttach(20, 6, .{ .ext_multigrid = true });
     _ = try nvim_client.request("nvim_input", 1);

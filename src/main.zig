@@ -61,8 +61,8 @@ fn eql(a: []const u8, b: []const u8) bool {
 }
 
 test {
-    // every file, reached from here; golden.zig is its own test module
-    _ = @import("lua_spec.zig");
+    // every file of the app; the modules, integration_tests.zig and
+    // golden_tests.zig are their own test modules
     _ = @import("daemon/loop.zig");
     _ = @import("daemon/fdpass.zig");
     _ = @import("daemon/pane_helper.zig");

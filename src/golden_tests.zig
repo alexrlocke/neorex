@@ -10,6 +10,7 @@ const render = @import("screen").render;
 const nvim = @import("nvim");
 
 const msgpack = @import("msgpack");
+const testing_nvim = @import("testing/nvim.zig");
 
 const testing = std.testing;
 const gpa = testing.allocator;
@@ -344,10 +345,7 @@ test "live neovim session" {
     const cols = 40;
     const rows = 12;
     var buf: [256]u8 = undefined;
-    var nvim_client = nvim.Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n" }, &buf) catch |err| switch (err) {
-        error.FileNotFound => return error.SkipZigTest,
-        else => return err,
-    };
+    var nvim_client = try testing_nvim.spawn(&buf);
     defer nvim_client.deinit(gpa);
     try nvim_client.uiAttach(cols, rows, .{});
 
@@ -613,10 +611,7 @@ const multi_steps = [_][]const u8{
 test "live neovim with a pane per window" {
     var buf: [1024]u8 = undefined;
     var m: Multi = .{
-        .nvim_client = nvim.Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n" }, &buf) catch |err| switch (err) {
-            error.FileNotFound => return error.SkipZigTest,
-            else => return err,
-        },
+        .nvim_client = try testing_nvim.spawn(&buf),
         .panes = .{
             .{ .view = .init(30, 8), .t = try testTerminal(30, 8) },
             .{ .view = .init(24, 6), .t = try testTerminal(24, 6) },

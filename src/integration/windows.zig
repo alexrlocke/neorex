@@ -9,112 +9,12 @@ const nvim = @import("nvim");
 
 const msgpack = @import("msgpack");
 
-/// A Neovim running windows.lua, and what it has said.
-const Harness = struct {
-    nvim_client: nvim.Nvim,
-    grids: Grids = .{},
-    notes: std.ArrayList(nvim.windows.Note) = .empty,
-    /// Each window's last title, copied: a note's points into the read buffer.
-    titles: std.AutoArrayHashMapUnmanaged(i64, []u8) = .empty,
-    setup_id: u32 = 0,
-    chan_id: u32 = 0,
-    wins: [2]i64 = .{ 0, 0 },
-    /// The windows a check waits for.
-    want: i64 = 0,
-    gone: i64 = 0,
-    /// The last options sent, how many have been, and their problems.
-    options: nvim.Options = .default,
-    options_sent: u32 = 0,
-    problems_buf: [512]u8 = undefined,
-    problems: []const u8 = "",
-
-    fn deinit(h: *Harness) void {
-        h.grids.deinit(testing.allocator);
-        h.notes.deinit(testing.allocator);
-        for (h.titles.values()) |t| testing.allocator.free(t);
-        h.titles.deinit(testing.allocator);
-        h.nvim_client.deinit(testing.allocator);
-    }
-
-    /// Reads until `done`, or false if Neovim exits.
-    fn until(h: *Harness, comptime done: fn (*Harness) bool) !bool {
-        const gpa = testing.allocator;
-        for (0..200) |_| {
-            if (done(h)) return true;
-            var fds = [_]std.c.pollfd{.{ .fd = h.nvim_client.readFd(), .events = std.c.POLL.IN, .revents = 0 }};
-            if (std.c.poll(&fds, 1, 3000) <= 0) return error.TestTimedOut;
-            if (!try h.nvim_client.read(gpa)) return false;
-            while (try h.nvim_client.next()) |msg| switch (msg) {
-                .notification => |n| {
-                    var params = n.params;
-                    if (std.mem.eql(u8, n.method, "redraw")) {
-                        _ = try h.grids.applyRedraw(gpa, &params);
-                    } else if (std.mem.eql(u8, n.method, nvim.Options.method)) {
-                        var problems: std.Io.Writer = .fixed(&h.problems_buf);
-                        h.options = try nvim.Options.decode(&params, &problems);
-                        h.problems = problems.buffered();
-                        h.options_sent += 1;
-                    } else if (try nvim.windows.parseNote(n.method, &params)) |note| switch (note) {
-                        .title => |t| {
-                            const name = try gpa.dupe(u8, t.name);
-                            if (try h.titles.fetchPut(gpa, t.win, name)) |old| gpa.free(old.value);
-                        },
-                        else => try h.notes.append(gpa, note),
-                    };
-                },
-                .response => |r| {
-                    if (r.err) |e| {
-                        std.debug.print("neovim: {s}\n", .{e});
-                        return error.NvimError;
-                    }
-                    var result = r.result;
-                    if (r.id == h.chan_id) {
-                        h.setup_id = try nvim.windows.setup(&h.nvim_client, try nvim.windows.parseChannel(&result), 40, 9);
-                        try h.nvim_client.flush();
-                    } else if (r.id == h.setup_id) h.wins = try nvim.windows.parseSetup(&result);
-                },
-                .request => |r| try h.nvim_client.respondError(r.id, "test"),
-            };
-        }
-        return error.TestTimedOut;
-    }
-
-    fn input(h: *Harness, keys: []const u8) !void {
-        _ = try h.nvim_client.request("nvim_input", 1);
-        try msgpack.writeStr(h.nvim_client.writer(), keys);
-        try h.nvim_client.flush();
-    }
-
-    fn lastCurrent(h: *const Harness) i64 {
-        var i = h.notes.items.len;
-        while (i > 0) {
-            i -= 1;
-            if (h.notes.items[i] == .current) return h.notes.items[i].current;
-        }
-        return 0;
-    }
-
-    fn splitNote(h: *const Harness, win: i64) ?nvim.windows.Note {
-        for (h.notes.items) |n| if (n == .split and n.split.win == win) return n;
-        return null;
-    }
-
-    fn isCurrent(h: *Harness) bool {
-        return h.lastCurrent() == h.want;
-    }
-
-    fn kind(h: *const Harness, win: i64) ?Grids.Win.Kind {
-        const grid = h.grids.gridOf(win) orelse return null;
-        return h.grids.winOn(grid).?.kind;
-    }
-};
+const Harness = @import("../testing/NvimHarness.zig");
+const testing_nvim = @import("../testing/nvim.zig");
 
 test "windows become external; the anchor stays hidden" {
     var buf: [1024]u8 = undefined;
-    var h: Harness = .{ .nvim_client = nvim.Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n" }, &buf) catch |err| switch (err) {
-        error.FileNotFound => return error.SkipZigTest,
-        else => return err,
-    } };
+    var h: Harness = .{ .nvim_client = try testing_nvim.spawn(&buf) };
     defer h.deinit();
     try h.nvim_client.uiAttach(40, 10, .{ .ext_multigrid = true });
     h.chan_id = try nvim.windows.askChannel(&h.nvim_client);
@@ -255,10 +155,7 @@ fn luaThenSettle(h: *Harness, comptime code: []const u8, comptime ms: []const u8
 
 test "a window Neovim resizes itself snaps back to its pane's size" {
     var buf: [1024]u8 = undefined;
-    var h: Harness = .{ .nvim_client = nvim.Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n" }, &buf) catch |err| switch (err) {
-        error.FileNotFound => return error.SkipZigTest,
-        else => return err,
-    } };
+    var h: Harness = .{ .nvim_client = try testing_nvim.spawn(&buf) };
     defer h.deinit();
     try h.nvim_client.uiAttach(40, 10, .{ .ext_multigrid = true });
     h.chan_id = try nvim.windows.askChannel(&h.nvim_client);
@@ -290,10 +187,7 @@ fn resizeOf(h: *const Harness, win: i64) ?nvim.windows.Resize {
 
 test "a window Neovim resizes asks for its pane to be resized" {
     var buf: [1024]u8 = undefined;
-    var h: Harness = .{ .nvim_client = nvim.Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n" }, &buf) catch |err| switch (err) {
-        error.FileNotFound => return error.SkipZigTest,
-        else => return err,
-    } };
+    var h: Harness = .{ .nvim_client = try testing_nvim.spawn(&buf) };
     defer h.deinit();
     try h.nvim_client.uiAttach(40, 10, .{ .ext_multigrid = true });
     h.chan_id = try nvim.windows.askChannel(&h.nvim_client);
@@ -387,10 +281,7 @@ fn closeAndWait(h: *Harness, win: i64) !void {
 
 test "fixed-size windows report their size" {
     var buf: [1024]u8 = undefined;
-    var h: Harness = .{ .nvim_client = nvim.Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n" }, &buf) catch |err| switch (err) {
-        error.FileNotFound => return error.SkipZigTest,
-        else => return err,
-    } };
+    var h: Harness = .{ .nvim_client = try testing_nvim.spawn(&buf) };
     defer h.deinit();
     try h.nvim_client.uiAttach(40, 10, .{ .ext_multigrid = true });
     h.chan_id = try nvim.windows.askChannel(&h.nvim_client);
@@ -429,10 +320,7 @@ fn titleIs(h: *const Harness, win: i64, want: []const u8) bool {
 
 test "each window's title is its file name" {
     var buf: [1024]u8 = undefined;
-    var h: Harness = .{ .nvim_client = nvim.Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n" }, &buf) catch |err| switch (err) {
-        error.FileNotFound => return error.SkipZigTest,
-        else => return err,
-    } };
+    var h: Harness = .{ .nvim_client = try testing_nvim.spawn(&buf) };
     defer h.deinit();
     try h.nvim_client.uiAttach(40, 10, .{ .ext_multigrid = true });
     h.chan_id = try nvim.windows.askChannel(&h.nvim_client);
@@ -476,10 +364,7 @@ test "each window's title is its file name" {
 
 test "each window shows a statusline inside its pane" {
     var buf: [1024]u8 = undefined;
-    var h: Harness = .{ .nvim_client = nvim.Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n" }, &buf) catch |err| switch (err) {
-        error.FileNotFound => return error.SkipZigTest,
-        else => return err,
-    } };
+    var h: Harness = .{ .nvim_client = try testing_nvim.spawn(&buf) };
     defer h.deinit();
     try h.nvim_client.uiAttach(40, 10, .{ .ext_multigrid = true });
     h.chan_id = try nvim.windows.askChannel(&h.nvim_client);
@@ -554,10 +439,7 @@ test "each window shows a statusline inside its pane" {
 
 test "to Lua, a window a pane shows isn't a popup" {
     var buf: [1024]u8 = undefined;
-    var h: Harness = .{ .nvim_client = nvim.Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n" }, &buf) catch |err| switch (err) {
-        error.FileNotFound => return error.SkipZigTest,
-        else => return err,
-    } };
+    var h: Harness = .{ .nvim_client = try testing_nvim.spawn(&buf) };
     defer h.deinit();
     try h.nvim_client.uiAttach(40, 10, .{ .ext_multigrid = true });
     h.chan_id = try nvim.windows.askChannel(&h.nvim_client);
@@ -593,10 +475,7 @@ fn lastCmdheight(h: *const Harness) ?u32 {
 
 test "'cmdheight' is reported at setup and when it changes" {
     var buf: [1024]u8 = undefined;
-    var h: Harness = .{ .nvim_client = nvim.Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n" }, &buf) catch |err| switch (err) {
-        error.FileNotFound => return error.SkipZigTest,
-        else => return err,
-    } };
+    var h: Harness = .{ .nvim_client = try testing_nvim.spawn(&buf) };
     defer h.deinit();
     try h.nvim_client.uiAttach(40, 10, .{ .ext_multigrid = true });
     h.chan_id = try nvim.windows.askChannel(&h.nvim_client);
@@ -627,7 +506,7 @@ test "'cmdheight' is reported at setup and when it changes" {
 /// A Neovim run with `extra` args, its Lua set up.
 fn optionsHarness(buf: []u8, comptime extra: []const []const u8) !Harness {
     var h: Harness = .{ .nvim_client = nvim.Nvim.spawn(testing.io, &[_][]const u8{ "nvim", "--clean", "--embed", "-n" } ++ extra, buf) catch |err| switch (err) {
-        error.FileNotFound => return error.SkipZigTest,
+        error.FileNotFound => return testing_nvim.notInstalled(),
         else => return err,
     } };
     errdefer h.deinit();
