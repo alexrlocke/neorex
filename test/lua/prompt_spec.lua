@@ -31,6 +31,9 @@ end
 -- files to appear, and must never read one half written.
 local dir = vim.fn.tempname()
 vim.fn.mkdir(dir, 'p')
+-- with no symlinks, as Neovim names buffers: on macOS the temp directory is
+-- under /var, a link to /private/var, and every path here starts from it
+dir = assert(vim.uv.fs_realpath(dir))
 local fake = dir .. '/rex'
 local f = assert(io.open(fake, 'w'))
 f:write([[#!/bin/sh
