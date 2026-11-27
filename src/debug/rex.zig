@@ -19,7 +19,8 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, socket_path: []const u8) !void {
     if (!std.fs.path.isAbsolute(socket_path)) return error.SocketPathNotAbsolute;
     const server_url = try rex.server.url(gpa, io);
     defer gpa.free(server_url);
-    const session_id = std.mem.span(std.c.getenv("REX_SESSION") orelse return error.NoRexSession);
+    const session_id = try rex.server.sessionId(gpa, io);
+    defer gpa.free(session_id);
     const anchor_id: ?[]const u8 = if (std.c.getenv("REX_BLOCK")) |b| std.mem.span(b) else null;
     var exe_buf: [1024]u8 = undefined;
     const exe = exe_buf[0..try std.process.executablePath(io, &exe_buf)];

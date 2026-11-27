@@ -235,11 +235,11 @@ end
 Going to a location leaves a mark in the jumplist, and the LSP pickers put
 where you came from on the tag stack, so `CTRL-T` goes back. Grep asks for
 the whole query, then lists the matches: Rex's palette can't search as you
-type, or preview. Rex shows at most 2,000 items and takes at most 64 KiB in one
-question, which is often fewer: around 700 files. A longer list asks for part of
+type, or preview. Rex shows at most 2,000 items and takes at most 1 MiB in one
+question, which only very long rows fill first. A longer list asks for part of
 a name first, then lists what matches; if that is still too many, it lists the
-first that fit, and its title says how many, such as "Files: model (first 650
-of 900)".
+first that fit, and its title says how many, such as "Files: model (first 2000
+of 2500)".
 
 For a list of your own, call `require("neorex.ui").select`. It takes
 `vim.ui.select`'s arguments, and `opts.rex` adds what only Rex shows:

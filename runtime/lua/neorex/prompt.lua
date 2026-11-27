@@ -20,9 +20,9 @@ M.setup_line = 'pcall(dofile, os.getenv("HOME") .. "/.local/state/neorex/rex.lua
 -- Rex lists at most this many items.
 M.max_items = 2000
 
--- Rex refuses a request bigger than 64 KiB, measured as its CLI encodes it:
+-- Rex refuses a request bigger than 1 MiB, measured as its CLI encodes it:
 -- the question plus the request around it. Questions stay under this.
-M.max_bytes = 60 * 1024
+M.max_bytes = 1020 * 1024
 
 -- `s`'s size once encoded as Rex's CLI does, which writes <, > and & as
 -- < and so on.

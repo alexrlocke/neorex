@@ -57,9 +57,11 @@ local groups = {
   Directory = { ctermfg = blue },
   Title = { ctermfg = blue, bold = true },
 
-  -- statusline, tabline, winbar
-  StatusLine = { ctermbg = faint },
-  StatusLineNC = { ctermfg = grey, ctermbg = faint },
+  -- statusline, tabline, winbar. The statusline has no background of its
+  -- own: every section is drawn over it, and a bottom row with a background
+  -- in each cell makes Rex fill the pane's padding with that color.
+  StatusLine = {},
+  StatusLineNC = { ctermfg = grey },
   TabLine = { ctermfg = grey, ctermbg = faint },
   TabLineFill = { ctermbg = faint },
   TabLineSel = { bold = true },

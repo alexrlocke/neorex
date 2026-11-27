@@ -513,6 +513,14 @@ fn optionsHarness(buf: []u8, comptime extra: []const []const u8) !Harness {
     try h.nvim_client.uiAttach(60, 10, .{ .ext_multigrid = true });
     h.chan_id = try nvim.windows.askChannel(&h.nvim_client);
     try h.nvim_client.flush();
+    // a test may end on the first options sent. Closing Neovim's stdin while
+    // the Lua still has notes to send leaves it at a "more" prompt over
+    // their errors, so wait for the first window
+    _ = try h.until(struct {
+        fn f(x: *Harness) bool {
+            return x.wins[0] != 0 and x.lastCurrent() == x.wins[0];
+        }
+    }.f);
     return h;
 }
 
