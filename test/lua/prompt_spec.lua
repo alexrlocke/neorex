@@ -26,7 +26,9 @@ local function eq(want, got, what)
 end
 
 -- The fake rex. Its Nth call answers with reply.N, stderr.N and code.N when
--- they exist, else reply, stderr and code.
+-- they exist, else reply, stderr and code. What it records (count, argv,
+-- stdin) is written whole and then renamed into place: tests wait for those
+-- files to appear, and must never read one half written.
 local dir = vim.fn.tempname()
 vim.fn.mkdir(dir, 'p')
 local fake = dir .. '/rex'
@@ -34,13 +36,17 @@ local f = assert(io.open(fake, 'w'))
 f:write([[#!/bin/sh
 d=$(dirname "$0")
 n=$(( $(cat "$d/count" 2>/dev/null || echo 0) + 1 ))
-echo $n > "$d/count"
-echo "$*" >> "$d/argv"
+echo $n > "$d/count.tmp" && mv "$d/count.tmp" "$d/count"
+{ cat "$d/argv" 2>/dev/null; echo "$*"; } > "$d/argv.tmp" && mv "$d/argv.tmp" "$d/argv"
 pick() { if [ -f "$d/$1.$n" ]; then cat "$d/$1.$n"; else cat "$d/$1" 2>/dev/null; fi; }
 # read the whole answer before recording stdin: a test that sees stdin may
 # change the answer for the next call at once
 reply=$(pick reply); err=$(pick stderr); code=$(pick code)
-case "$*" in *client.action*) cat > "$d/stdin.$n" ; cp "$d/stdin.$n" "$d/stdin" ;; esac
+case "$*" in *client.action*)
+  cat > "$d/stdin.tmp"
+  cp "$d/stdin.tmp" "$d/stdin.$n.tmp" && mv "$d/stdin.$n.tmp" "$d/stdin.$n"
+  mv "$d/stdin.tmp" "$d/stdin" ;;
+esac
 [ -n "$reply" ] && printf '%s\n' "$reply"
 [ -n "$err" ] && printf '%s\n' "$err" >&2
 exit ${code:-0}
