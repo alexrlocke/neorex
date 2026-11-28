@@ -579,3 +579,39 @@ test "options: what's wrong reaches the daemon" {
     }.f));
     try testing.expectEqualStrings("neorex_config.cmdline: expected \"neovim\" or \"rex\", got \"tui\"\n", h.problems);
 }
+
+fn reopened(x: *Harness) bool {
+    const cur = x.lastCurrent();
+    return cur != 0 and cur != x.want and x.kind(cur) == .external and x.kind(x.want) == null;
+}
+
+test "'winborder' leaves panes borderless" {
+    var buf: [1024]u8 = undefined;
+    var h: Harness = .{ .nvim_client = try testing_nvim.spawn(&buf) };
+    defer h.deinit();
+    try h.nvim_client.uiAttach(40, 10, .{ .ext_multigrid = true });
+    h.chan_id = try nvim.windows.askChannel(&h.nvim_client);
+    try h.nvim_client.flush();
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return x.wins[0] != 0 and x.kind(x.wins[0]) == .external;
+        }
+    }.f));
+    const first = h.wins[0];
+    try luaThenSettle(&h, "vim.o.winborder = 'rounded'", "50");
+
+    // an adopted split fills its pane exactly: a border would add a cell on
+    // each side and push the statusline out of the pane
+    const split = try openAdopted(&h, ":split<CR>");
+    try testing.expectEqual(@as(u32, 20), gridWidth(&h, split[0]));
+    try testing.expectEqual(@as(u32, 9), gridHeight(&h, split[0]));
+    try closeAndWait(&h, split[0]);
+
+    // the window reopened after :close on the last one has no border either
+    const cols = gridWidth(&h, first);
+    h.notes.clearRetainingCapacity();
+    h.want = first;
+    try h.input(":close<CR>");
+    try testing.expect(try h.until(reopened));
+    try testing.expectEqual(cols, gridWidth(&h, h.lastCurrent()));
+}

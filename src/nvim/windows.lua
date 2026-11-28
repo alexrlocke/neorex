@@ -161,7 +161,7 @@ function M.adopt(win, w, h)
     making_anchor = false
   end
   give_statusline(win)
-  api.nvim_win_set_config(win, { external = true, width = w, height = text_height(win, h) })
+  api.nvim_win_set_config(win, { external = true, border = 'none', width = w, height = text_height(win, h) })
   sizes[win] = { w, h }
 end
 
@@ -502,7 +502,7 @@ api.nvim_create_autocmd('WinClosed', {
     vim.rpcnotify(chan, 'neorex_reopen', win)
     vim.schedule(function()
       if not api.nvim_buf_is_valid(buf) then buf = api.nvim_create_buf(true, false) end
-      local new = api.nvim_open_win(buf, true, { external = true, width = c.width, height = c.height })
+      local new = api.nvim_open_win(buf, true, { external = true, border = 'none', width = c.width, height = c.height })
       api.nvim_win_call(new, function() vim.fn.winrestview(view) end)
     end)
   end,
